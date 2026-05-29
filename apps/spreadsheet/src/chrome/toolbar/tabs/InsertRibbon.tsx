@@ -3,7 +3,7 @@
  *
  * Insert tab content organized around Mog command groups:
  * 1. Tables (Pivot table, Table, Forms)
- * 2. Illustrations (Pictures, Shapes, Diagram, Screenshot - then Icons, 3D Models)
+ * 2. Illustrations (Pictures, Shapes, Diagram, Screenshot - then Icons)
  * 3. Charts (full catalog dropdown + individual chart type galleries)
  * 4. Sparklines (Line, Column, Win/Loss - THREE separate buttons per Excel 365)
  * 5. Filters (Filter control, Date filter - stubs for now)
@@ -39,6 +39,7 @@ import {
 } from '@mog-sdk/contracts/ribbon';
 import { ChartsGroup } from '../../../components/charts/ChartsGroup';
 import { useDispatch } from '../../../hooks/toolbar/use-action-dependencies';
+import { useSheetProtectionPermissions } from '../../../hooks/structure/use-sheet-protection';
 import { useActiveCell } from '../../../hooks/selection/use-active-cell';
 import { useSelectionRanges } from '../../../hooks/selection/use-granular-selection';
 import { PRODUCT_VOCABULARY } from '../../../ux/product-vocabulary';
@@ -46,6 +47,7 @@ import { keyTipRegistry } from '../keytips';
 import { RibbonButton } from '../primitives/RibbonButton';
 import { RibbonDropdownItem, RibbonDropdownPanel } from '../primitives/RibbonDropdown';
 import { ToolbarGroup } from '../primitives/ToolbarGroup';
+import { RibbonVisibilityItem } from '../visibility/RibbonVisibilityContext';
 import {
   ChartIcon,
   ColumnSparklineIcon,
@@ -55,7 +57,6 @@ import {
   HyperlinkIcon,
   IconsIcon,
   LineSparklineIcon,
-  Model3DIcon,
   NewCommentIcon,
   ObjectIcon,
   PictureIcon,
@@ -91,6 +92,7 @@ export function InsertRibbon() {
   const wb = useWorkbook();
   const { row: activeRow, col: activeCol } = useActiveCell();
   const ranges = useSelectionRanges();
+  const sheetPermissions = useSheetProtectionPermissions(activeSheetId);
 
   // UIStore action for the inline shapes menu (anchored popover, not a
   // dialog). The visible ribbon click records an anchor; keytips open the
@@ -301,6 +303,7 @@ export function InsertRibbon() {
           icon={<FormsIcon />}
           label="Check Box"
           onClick={insertCheckboxFormControl}
+          disabled={!sheetPermissions.editObject}
           title="Insert Checkbox Form Control"
           aria-label="Insert Checkbox Form Control"
         />
@@ -311,6 +314,7 @@ export function InsertRibbon() {
           icon={<FormsIcon />}
           label="Combo Box"
           onClick={insertComboBoxFormControl}
+          disabled={!sheetPermissions.editObject}
           title="Insert Combo Box Form Control"
           aria-label="Insert Combo Box Form Control"
         />
@@ -377,18 +381,6 @@ export function InsertRibbon() {
           title="Insert Icons (coming soon)"
           aria-label="Insert Icons"
         />
-        {/* 3D Models stub - disabled */}
-        <RibbonButton
-          layout="vertical"
-          height="full"
-          icon={<Model3DIcon />}
-          label="3D Models"
-          hasDropdown
-          dropdownPosition="inline"
-          disabled
-          title="Insert 3D Models (coming soon)"
-          aria-label="Insert 3D Models"
-        />
       </ToolbarGroup>
 
       {/* 3. Charts Group */}
@@ -426,6 +418,7 @@ export function InsertRibbon() {
             aria-label="Insert Sparkline"
             aria-expanded={isSparklineDropdownOpen}
             aria-haspopup="menu"
+            visibilityKey="sparklines"
           />
           <RibbonDropdownPanel
             open={isSparklineDropdownOpen}
@@ -436,36 +429,42 @@ export function InsertRibbon() {
               className="bg-ss-surface rounded shadow-ss-md border border-ss-border min-w-[160px] py-1"
               role="menu"
             >
-              <RibbonDropdownItem
-                dataValue="line"
-                icon={<LineSparklineIcon />}
-                onClick={() => {
-                  insertSparkline('line');
-                  setIsSparklineDropdownOpen(false);
-                }}
-              >
-                Line
-              </RibbonDropdownItem>
-              <RibbonDropdownItem
-                dataValue="column"
-                icon={<ColumnSparklineIcon />}
-                onClick={() => {
-                  insertSparkline('column');
-                  setIsSparklineDropdownOpen(false);
-                }}
-              >
-                Column
-              </RibbonDropdownItem>
-              <RibbonDropdownItem
-                dataValue="winLoss"
-                icon={<WinLossSparklineIcon />}
-                onClick={() => {
-                  insertSparkline('winLoss');
-                  setIsSparklineDropdownOpen(false);
-                }}
-              >
-                Win/Loss
-              </RibbonDropdownItem>
+              <RibbonVisibilityItem item="line">
+                <RibbonDropdownItem
+                  dataValue="line"
+                  icon={<LineSparklineIcon />}
+                  onClick={() => {
+                    insertSparkline('line');
+                    setIsSparklineDropdownOpen(false);
+                  }}
+                >
+                  Line
+                </RibbonDropdownItem>
+              </RibbonVisibilityItem>
+              <RibbonVisibilityItem item="column">
+                <RibbonDropdownItem
+                  dataValue="column"
+                  icon={<ColumnSparklineIcon />}
+                  onClick={() => {
+                    insertSparkline('column');
+                    setIsSparklineDropdownOpen(false);
+                  }}
+                >
+                  Column
+                </RibbonDropdownItem>
+              </RibbonVisibilityItem>
+              <RibbonVisibilityItem item="winLoss">
+                <RibbonDropdownItem
+                  dataValue="winLoss"
+                  icon={<WinLossSparklineIcon />}
+                  onClick={() => {
+                    insertSparkline('winLoss');
+                    setIsSparklineDropdownOpen(false);
+                  }}
+                >
+                  Win/Loss
+                </RibbonDropdownItem>
+              </RibbonVisibilityItem>
             </div>
           </RibbonDropdownPanel>
         </div>
@@ -491,6 +490,7 @@ export function InsertRibbon() {
               : `Insert ${PRODUCT_VOCABULARY.filterControl.label.toLowerCase()}`
           }
           aria-label={`Insert ${PRODUCT_VOCABULARY.filterControl.label.toLowerCase()}`}
+          visibilityKey="filterControl"
         />
         <RibbonButton
           layout="vertical"
@@ -500,6 +500,7 @@ export function InsertRibbon() {
           disabled
           title={`Insert ${PRODUCT_VOCABULARY.dateFilter.label.toLowerCase()} (coming soon)`}
           aria-label={`Insert ${PRODUCT_VOCABULARY.dateFilter.label.toLowerCase()}`}
+          visibilityKey="dateFilter"
         />
       </ToolbarGroup>
 
@@ -580,6 +581,7 @@ export function InsertRibbon() {
           onClick={openTextEffectGallery}
           title={`Insert ${PRODUCT_VOCABULARY.textEffects.label.toLowerCase()}`}
           aria-label={`Insert ${PRODUCT_VOCABULARY.textEffects.label.toLowerCase()}`}
+          visibilityKey="textEffects"
         />
         {/* Object stub - disabled */}
         <RibbonButton
@@ -601,6 +603,7 @@ export function InsertRibbon() {
           onClick={insertEquation}
           title="Insert Equation (Alt+N+E)"
           aria-label="Insert Equation"
+          visibilityKey="equation"
         />
       </ToolbarGroup>
     </>

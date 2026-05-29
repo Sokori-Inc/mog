@@ -46,6 +46,12 @@ export interface RelativeComment {
   createdAt: number;
   /** Whether the comment was resolved */
   resolved?: boolean;
+  /** Comment kind from the worksheet API. */
+  commentType?: 'note' | 'threadedComment';
+  /** Thread grouping for threaded comments. */
+  threadId?: string | null;
+  /** Parent comment ID for replies. */
+  parentId?: string | null;
 }
 
 /**
@@ -121,8 +127,6 @@ export interface ClipboardData {
   cells: Record<string, ClipboardCellData>;
   /** Original sheet ID for cross-sheet paste detection */
   sourceSheetId: string;
-  /** Timestamp for staleness detection */
-  timestamp: number;
   /**
    * Text signature written to system clipboard (TSV format).
    * Used to detect if system clipboard was overwritten by another app.

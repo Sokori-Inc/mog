@@ -31,6 +31,7 @@ import type {
   ClearResult,
   EventHandler,
   FormatEntry,
+  FormulaCircularReferenceValidation,
   FormulaSyntaxValidationError,
   IdentifiedCellData,
   NumberFormatCategory,
@@ -72,6 +73,7 @@ import type {
   SpreadsheetEvent,
 } from '@mog-sdk/contracts/events';
 import type { AutoFillMode, AutoFillResult, FillSeriesOptions } from '@mog-sdk/contracts/fill';
+import { maskExternalFormulaRefsForValidation } from '../../services/external-formulas';
 import type { IObjectBoundsReader } from '@mog-sdk/contracts/objects';
 import { type CallableDisposable, toDisposable } from '@mog/spreadsheet-utils/disposable';
 import { KernelError, toMogSdkError } from '../../errors';
@@ -1301,13 +1303,30 @@ export class WorksheetImpl implements Worksheet {
   }
 
   async validateFormulaSyntax(formula: string): Promise<FormulaSyntaxValidationError | null> {
-    const result = await this.ctx.computeBridge.validateFormulaSyntax(this.sheetId, formula);
+    const validationFormula = maskExternalFormulaRefsForValidation(formula);
+    const result = await this.ctx.computeBridge.validateFormulaSyntax(
+      this.sheetId,
+      validationFormula,
+    );
     if (!result) return null;
     const [errorMessage, errorPosition] = result;
     return {
       errorMessage,
       ...(errorPosition == null ? {} : { errorPosition }),
     };
+  }
+
+  async validateFormulaCircularReference(
+    formula: string,
+    row: number,
+    col: number,
+  ): Promise<FormulaCircularReferenceValidation | null> {
+    return this.ctx.computeBridge.validateFormulaCircularReference(
+      this.sheetId,
+      row,
+      col,
+      maskExternalFormulaRefsForValidation(formula),
+    );
   }
 
   // ===========================================================================
@@ -2583,6 +2602,7 @@ export class WorksheetImpl implements Worksheet {
   private _formControls?: WorksheetFormControlsImpl;
   get formControls(): WorksheetFormControls {
     return (this._formControls ??= new WorksheetFormControlsImpl(
+      this.ctx,
       (
         this.workbook as unknown as {
           getFormControlManager(): import('@mog-sdk/contracts/form-controls').IFormControlManager;

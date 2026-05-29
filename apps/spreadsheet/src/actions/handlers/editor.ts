@@ -30,7 +30,7 @@ import type { CellRange, SheetId } from '@mog-sdk/contracts/core';
 import { MAX_COLS, MAX_ROWS } from '@mog-sdk/contracts/core';
 import type { Direction } from '@mog-sdk/contracts/machines';
 import type { CellCoord } from '@mog-sdk/contracts/rendering';
-import type { Worksheet } from '@mog-sdk/contracts/api';
+import type { Worksheet, WorksheetWithInternals } from '@mog-sdk/contracts/api';
 // Fill operations - use executeFillViaWorksheet for proper formula adjustment
 import type { FillDirection } from '../../domain/fill/types';
 import { executeFillViaWorksheet } from './fill/types';
@@ -44,7 +44,7 @@ import {
   singleCellRange,
 } from '../../systems/shared/types';
 
-import { letterToCol } from '@mog/spreadsheet-utils/a1';
+import { letterToCol, parseA1Range as parseA1RangeNotation } from '@mog/spreadsheet-utils/a1';
 
 import { getRelativeCommandColumn, resolveDataCommandTarget } from '../data-command-target';
 import { guardBridgeMutation } from './bridge-error-guard';
@@ -450,9 +450,7 @@ export const CLEAR_CONTENTS: AsyncActionHandler = async (deps) => {
 };
 
 /**
- * Clear all - clear both contents and formats from selected cells.
- *
- * Uses ws.setCell(row, col, null) and ws.clearFormat(row, col).
+ * Clear all cell-attached payloads from selected cells.
  *
  * Multi-Sheet Support
  * - Broadcasts to all selected sheets when multiple sheets are selected
@@ -465,32 +463,101 @@ export const CLEAR_ALL: AsyncActionHandler = async (deps) => {
     for (const sheetId of targetSheetIds) {
       const ws = getWorksheet(deps, sheetId);
       for (const range of ranges) {
-        // Clear contents: batch null values (1 IPC).
-        // PartialArrayWrite is possible if the range covers part of a CSE
-        // array; mirror CLEAR_CONTENTS by exiting early on rejection so
-        // subsequent ranges are skipped.
-        const rows = range.endRow - range.startRow + 1;
-        const cols = range.endCol - range.startCol + 1;
-        const nullValues = Array.from({ length: rows }, () => Array(cols).fill(null));
-        const ok = await guardBridgeMutation(() =>
-          ws.setRange(range.startRow, range.startCol, nullValues),
-        );
+        const ok = await guardBridgeMutation(() => ws.clear(range, 'all'));
         if (!ok) return;
-        // Clear formats: use clearFormatForRanges (removes all explicit formatting).
-        // Format clears cannot raise PartialArrayWrite, so they don't need
-        // the guard.
-        await ws.formats.clearRange({
-          startRow: range.startRow,
-          startCol: range.startCol,
-          endRow: range.endRow,
-          endCol: range.endCol,
-        });
+        await clearRangeMetadata(ws, range);
       }
     }
   });
 
   return handled();
 };
+
+async function clearRangeMetadata(ws: WorksheetWithInternals, range: CellRange): Promise<void> {
+  await Promise.all([
+    clearCommentsInRange(ws, range),
+    ws.validations.clearInRange(range),
+    ws.conditionalFormats.clearInRanges([range]),
+  ]);
+}
+
+async function clearCommentsInRange(ws: WorksheetWithInternals, range: CellRange): Promise<void> {
+  const comments = await ws.comments.list();
+  if (comments.length === 0) return;
+
+  const positions = await ws._internal.batchGetCellPositions(
+    comments.map((comment) => comment.cellRef),
+  );
+  const removals: Promise<void>[] = [];
+  const seenCells = new Set<string>();
+  for (const comment of comments) {
+    const position = positions.get(comment.cellRef);
+    if (!position) continue;
+    if (
+      position.row < range.startRow ||
+      position.row > range.endRow ||
+      position.col < range.startCol ||
+      position.col > range.endCol
+    ) {
+      continue;
+    }
+    const key = `${position.row},${position.col}`;
+    if (seenCells.has(key)) continue;
+    seenCells.add(key);
+    removals.push(ws.comments.removeForCell(position.row, position.col).then(() => undefined));
+  }
+  await Promise.all(removals);
+}
+
+function normalizedRange(range: CellRange): CellRange {
+  return {
+    startRow: Math.min(range.startRow, range.endRow),
+    startCol: Math.min(range.startCol, range.endCol),
+    endRow: Math.max(range.startRow, range.endRow),
+    endCol: Math.max(range.startCol, range.endCol),
+  };
+}
+
+function rangesEqual(a: CellRange, b: CellRange): boolean {
+  const left = normalizedRange(a);
+  const right = normalizedRange(b);
+  return (
+    left.startRow === right.startRow &&
+    left.startCol === right.startCol &&
+    left.endRow === right.endRow &&
+    left.endCol === right.endCol
+  );
+}
+
+function rangeContainsRange(container: CellRange, candidate: CellRange): boolean {
+  const outer = normalizedRange(container);
+  const inner = normalizedRange(candidate);
+  return (
+    inner.startRow >= outer.startRow &&
+    inner.endRow <= outer.endRow &&
+    inner.startCol >= outer.startCol &&
+    inner.endCol <= outer.endCol
+  );
+}
+
+function parseTableRange(range: string): CellRange | null {
+  const localRange = range.includes('!') ? range.slice(range.lastIndexOf('!') + 1) : range;
+  try {
+    return parseA1RangeNotation(localRange.replace(/\$/g, ''));
+  } catch {
+    return null;
+  }
+}
+
+async function removeTablesContainedByRange(ws: Worksheet, range: CellRange): Promise<void> {
+  const tables = await ws.tables.list();
+  for (const table of tables) {
+    const tableRange = parseTableRange(table.range);
+    if (tableRange && (rangesEqual(tableRange, range) || rangeContainsRange(range, tableRange))) {
+      await ws.tables.remove(table.name);
+    }
+  }
+}
 
 /**
  * Clear formats only from selected cells.
@@ -746,6 +813,7 @@ export const CLEAR_AND_EDIT: AsyncActionHandler = async (deps) => {
     let cleared = true;
     await deps.workbook.undoGroup(async () => {
       for (const range of ranges) {
+        await removeTablesContainedByRange(ws, range);
         const ok = await guardBridgeMutation(() => ws.clear(range, 'contents'));
         if (!ok) {
           cleared = false;

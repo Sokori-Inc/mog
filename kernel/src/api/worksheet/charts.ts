@@ -30,8 +30,10 @@ import type {
 } from '@mog-sdk/contracts/data/charts';
 
 import type { ChartFloatingObject } from '../../bridges/compute/compute-bridge';
+import { normalizeImportedComboChart } from '../../bridges/compute/chart-import-normalization';
 import type { DocumentContext } from '../../context';
 import type { ChartLayoutSnapshot } from '@mog-sdk/contracts/bridges';
+import { parseCellRange, rangeToA1 } from '../internal/utils';
 import {
   axisConfigToWire,
   dataLabelConfigToWire,
@@ -57,8 +59,9 @@ const UNSUPPORTED_NATIVE_XLSX_CHART_TYPES = new Set<ChartType>(['heatmap', 'viol
 // Chart Conversion Helpers
 // =============================================================================
 
-type ChartUpdatePayload = Omit<Partial<ChartFloatingObject>, 'anchor'> & {
+type ChartUpdatePayload = Omit<Partial<ChartFloatingObject>, 'anchor' | 'title'> & {
   anchor?: Partial<ChartFloatingObject['anchor']>;
+  title?: string | null;
 };
 
 function numericField(fields: Record<string, unknown>, key: string): number | undefined {
@@ -216,6 +219,26 @@ function deriveSeriesFormatForRead(series: SeriesConfig): SeriesConfig {
     result.lineWidth = series.format.line.width;
   }
   return result;
+}
+
+/**
+ * Public chart read APIs expose parseable A1 refs, while internal chart
+ * storage/export preserves imported OOXML-style refs with absolute markers.
+ */
+function normalizeChartA1RefForRead(ref: string | undefined): string | undefined {
+  if (!ref) return ref;
+  const parsed = parseCellRange(ref);
+  if (!parsed) return ref;
+  return parsed.sheetName ? rangeToA1(parsed, true, parsed.sheetName) : rangeToA1(parsed);
+}
+
+function normalizeSeriesRefsForRead(series: SeriesConfig): SeriesConfig {
+  return {
+    ...series,
+    values: normalizeChartA1RefForRead(series.values),
+    categories: normalizeChartA1RefForRead(series.categories),
+    bubbleSize: normalizeChartA1RefForRead(series.bubbleSize),
+  };
 }
 
 /**
@@ -434,7 +457,7 @@ function chartConfigToInternal(config: ChartConfig): ChartFloatingObject {
     seriesRange: config.seriesRange,
     categoryRange: config.categoryRange,
     seriesOrientation: config.seriesOrientation,
-    title: config.title,
+    title: config.title ?? undefined,
     subtitle: config.subtitle,
     legend,
     axis,
@@ -621,7 +644,8 @@ function chartUpdatesToInternal(updates: Partial<ChartConfig>): ChartUpdatePaylo
 /**
  * Convert internal ChartFloatingObject to the public Chart type from contracts.
  */
-function serializedChartToChart(chart: ChartFloatingObject): Chart {
+function serializedChartToChart(rawChart: ChartFloatingObject): Chart {
+  const chart = normalizeImportedComboChart(rawChart);
   // Group B2: Detect exploded pie variants on read.
   // If the internal type is 'pie'/'doughnut'/'pie3d' and the pieSlice indicates
   // full explosion (explosion > 0 on all slices or explicit flag), report as exploded type.
@@ -661,7 +685,9 @@ function serializedChartToChart(chart: ChartFloatingObject): Chart {
   const axis = axisConfig ? (deriveAxisFieldsForRead(axisConfig) as typeof axisConfig) : undefined;
 
   // Group D: Series format backward compatibility on read
-  const series = seriesConfigs?.map(deriveSeriesFormatForRead);
+  const series = seriesConfigs?.map((s) =>
+    normalizeSeriesRefsForRead(deriveSeriesFormatForRead(s)),
+  );
 
   // Group K: Legend entry visible ↔ delete reconciliation on read
   const legend = legendConfig
@@ -673,9 +699,9 @@ function serializedChartToChart(chart: ChartFloatingObject): Chart {
     sheetId: chart.sheetId ?? '',
     type: reportedType as Chart['type'],
     subType: chart.subType as Chart['subType'],
-    dataRange: chart.dataRange ?? '',
-    seriesRange: chart.seriesRange,
-    categoryRange: chart.categoryRange,
+    dataRange: normalizeChartA1RefForRead(chart.dataRange) ?? '',
+    seriesRange: normalizeChartA1RefForRead(chart.seriesRange),
+    categoryRange: normalizeChartA1RefForRead(chart.categoryRange),
     seriesOrientation: chart.seriesOrientation as Chart['seriesOrientation'],
     anchorRow: anchor.anchorRow,
     anchorCol: anchor.anchorCol,

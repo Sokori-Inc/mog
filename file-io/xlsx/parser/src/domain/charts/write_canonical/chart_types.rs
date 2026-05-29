@@ -14,7 +14,7 @@ use super::labels::emit_data_labels;
 use super::layout::{emit_chart_lines, emit_data_table, emit_layout, emit_up_down_bars};
 use super::series::emit_series;
 use super::shape_props::emit_shape_properties;
-use super::util::format_f64;
+use super::util::{format_f64, write_raw_xml_if_relationship_safe};
 
 pub(super) fn emit_plot_area(w: &mut XmlWriter, pa: &ooxml_types::charts::PlotArea) {
     w.start_element("c:plotArea").end_attrs();
@@ -42,6 +42,9 @@ pub(super) fn emit_plot_area(w: &mut XmlWriter, pa: &ooxml_types::charts::PlotAr
     // spPr
     if let Some(ref sp) = pa.sp_pr {
         emit_shape_properties(w, sp, "c:spPr");
+    }
+    if !pa.extensions.is_empty() {
+        emit_extensions(w, &pa.extensions);
     }
 
     w.end_element("c:plotArea");
@@ -228,6 +231,7 @@ fn emit_bar3d_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:bar3DChart");
 }
@@ -330,6 +334,7 @@ fn emit_line3d_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:line3DChart");
 }
@@ -363,6 +368,7 @@ fn emit_pie_chart(
             .attr("val", &v.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:pieChart");
 }
@@ -390,6 +396,7 @@ fn emit_pie3d_chart(
     if let Some(dl) = effective_d_lbls {
         emit_data_labels(w, dl);
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:pie3DChart");
 }
@@ -428,6 +435,7 @@ fn emit_doughnut_chart(
             .attr("val", &v.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:doughnutChart");
 }
@@ -470,6 +478,7 @@ fn emit_area_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:areaChart");
 }
@@ -517,6 +526,7 @@ fn emit_area3d_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:area3DChart");
 }
@@ -554,6 +564,7 @@ fn emit_scatter_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:scatterChart");
 }
@@ -608,6 +619,7 @@ fn emit_bubble_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:bubbleChart");
 }
@@ -645,6 +657,7 @@ fn emit_radar_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:radarChart");
 }
@@ -682,6 +695,7 @@ fn emit_surface_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element(tag);
 }
@@ -719,6 +733,7 @@ fn emit_stock_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:stockChart");
 }
@@ -788,6 +803,7 @@ fn emit_of_pie_chart(
             .attr("val", &id.to_string())
             .self_close();
     }
+    emit_chart_type_extensions(w, &cfg.extensions);
 
     w.end_element("c:ofPieChart");
 }
@@ -809,7 +825,7 @@ pub(super) fn emit_extensions(
 ) {
     w.start_element("c:extLst").end_attrs();
     for ext in extensions {
-        w.raw_str(&ext.xml);
+        write_raw_xml_if_relationship_safe(w, &ext.xml);
     }
     w.end_element("c:extLst");
 }
@@ -826,7 +842,7 @@ fn emit_chart_type_extensions(
     }
     // Check for raw extLst blob
     if extensions.len() == 1 && extensions[0].uri == "__raw_ext_lst__" {
-        w.raw_str(&extensions[0].xml);
+        write_raw_xml_if_relationship_safe(w, &extensions[0].xml);
     } else {
         emit_extensions(w, extensions);
     }

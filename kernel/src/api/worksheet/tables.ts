@@ -30,7 +30,7 @@ import type {
   TableSelectionChangedEvent,
   TableUpdatedEvent,
 } from '@mog-sdk/contracts/events';
-import type { TableConfig, TableStyle, TableStylePreset } from '@mog-sdk/contracts/tables';
+import type { TableConfig, TableStyle } from '@mog-sdk/contracts/tables';
 import type { RangeCellData, TotalsFunction } from '../../bridges/compute/compute-types.gen';
 import type { CellRange } from '@mog-sdk/contracts/core';
 import type { DocumentContext } from '../../context';
@@ -49,6 +49,7 @@ import {
 } from './operations/table-operations';
 import { columnFilterCriteriaToCompute } from '../../bridges/compute/compute-wire-converters';
 import * as FilterOps from './operations/filter-operations';
+import * as FillOps from './operations/fill-operations';
 import { toCellInput } from './operations/cell-input';
 import {
   assertCalculatedColumnAllowed,
@@ -64,6 +65,28 @@ import {
   dataRowToSheetRow,
   parseTableRange,
 } from './protected-table-operations';
+import {
+  tableStyleForEventConfig,
+  tableStyleIdForCompute,
+} from '../../domain/tables/style-normalization';
+
+type PendingClipboardPasteGlobal = typeof globalThis & {
+  __MOG_PENDING_CLIPBOARD_PASTE__?: Promise<unknown>;
+};
+
+async function waitForPendingClipboardPaste(): Promise<void> {
+  const deadline = Date.now() + 2000;
+
+  while (Date.now() < deadline) {
+    const pending = (globalThis as PendingClipboardPasteGlobal).__MOG_PENDING_CLIPBOARD_PASTE__;
+    if (!pending || typeof pending.then !== 'function') return;
+
+    await Promise.race([
+      pending.catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 16)),
+    ]);
+  }
+}
 
 // FIX-001-tables-hotcheck-v1
 export class WorksheetTablesImpl implements WorksheetTables {
@@ -147,26 +170,24 @@ export class WorksheetTablesImpl implements WorksheetTables {
     styleName: string | undefined,
     flags: Omit<TableStyle, 'preset' | 'custom'> = {},
   ): TableStyle {
-    const preset = this.normalizeTableStylePreset(styleName);
-    return preset ? { preset, ...flags } : { ...flags };
+    return tableStyleForEventConfig(styleName, flags);
   }
 
-  private normalizeTableStylePreset(styleName: string | undefined): TableStylePreset | undefined {
-    if (!styleName) return undefined;
-    const normalized = styleName.trim();
-    if (normalized === 'none') return 'none';
-
-    const full = normalized.match(/^TableStyle(Light|Medium|Dark)(\d+)$/i);
-    if (full) {
-      return `${full[1].toLowerCase()}${full[2]}` as TableStylePreset;
+  private async assertValidTableNameForRename(currentName: string, newName: string): Promise<void> {
+    const existingNames = (await this.list())
+      .map((table) => table.name)
+      .filter((name) => name.toLowerCase() !== currentName.toLowerCase());
+    const validation = await this.ctx.computeBridge.tableValidateTableName(newName, existingNames);
+    if (!validation.valid) {
+      throw new KernelError(
+        'TABLE_INVALID_NAME',
+        validation.reason ?? `Invalid table name: ${newName}`,
+        {
+          context: { currentName, newName },
+          path: ['name'],
+        },
+      );
     }
-
-    const short = normalized.match(/^(light|medium|dark)(\d+)$/i);
-    if (short) {
-      return `${short[1].toLowerCase()}${short[2]}` as TableStylePreset;
-    }
-
-    return undefined;
   }
 
   private tableUpdateOptionsToEventChanges(
@@ -269,7 +290,7 @@ export class WorksheetTablesImpl implements WorksheetTables {
       endCol,
       [],
       options?.hasHeaders !== false,
-      options?.style ?? null,
+      tableStyleIdForCompute(options?.style),
     );
 
     // Re-fetch the table to get the complete info (with generated name, columns, etc.)
@@ -344,6 +365,7 @@ export class WorksheetTablesImpl implements WorksheetTables {
   }
 
   async list(): Promise<TableInfo[]> {
+    await waitForPendingClipboardPaste();
     const tables = await this.ctx.computeBridge.getAllTablesInSheet(this.sheetId);
     return tables.map((t) => bridgeTableToTableInfo(t));
   }
@@ -374,6 +396,37 @@ export class WorksheetTablesImpl implements WorksheetTables {
     this.emitTableDeleted(name);
   }
 
+  async convertToRange(name: string): Promise<number> {
+    const table = await this.get(name);
+    await assertUnprotectedTableDefinition(
+      this.ctx,
+      this.sheetId,
+      'tables.convertToRange',
+      name,
+      table?.range,
+    );
+    const result = await this.ctx.computeBridge.convertTableToRange(name);
+    this.sortSpecCache.delete(name);
+    const convertedCount =
+      typeof result.data === 'number'
+        ? result.data
+        : typeof result.data === 'string'
+          ? Number(result.data)
+          : 0;
+    this.ctx.eventBus.emit({
+      type: 'table:converted-to-range',
+      timestamp: Date.now(),
+      sheetId: this.sheetId,
+      tableId: name,
+      tableName: name,
+      range: table ? this.tableRangeFromA1(table.range) : this.tableRangeFromA1('A1:A1'),
+      affectedFormulaCount: Number.isFinite(convertedCount) ? convertedCount : 0,
+      source: 'api',
+    });
+    this.emitTableDeleted(name);
+    return Number.isFinite(convertedCount) ? convertedCount : 0;
+  }
+
   async clear(): Promise<void> {
     const tables = await this.list();
     for (const table of tables) {
@@ -392,6 +445,7 @@ export class WorksheetTablesImpl implements WorksheetTables {
 
   async rename(oldName: string, newName: string): Promise<void> {
     await assertUnprotectedTableDefinition(this.ctx, this.sheetId, 'tables.rename', oldName);
+    await this.assertValidTableNameForRename(oldName, newName);
     await this.ctx.computeBridge.renameTable(oldName, newName);
     const cached = this.sortSpecCache.get(oldName);
     if (cached) {
@@ -436,8 +490,14 @@ export class WorksheetTablesImpl implements WorksheetTables {
     ) {
       await assertTableStyleAllowed(this.ctx, this.sheetId, 'tables.update.style', table);
     }
+    if (updates.name !== undefined) {
+      await this.assertValidTableNameForRename(tableName, updates.name);
+    }
     if (updates.style !== undefined) {
-      await this.ctx.computeBridge.setTableStyle(tableName, updates.style);
+      await this.ctx.computeBridge.setTableStyle(
+        tableName,
+        tableStyleIdForCompute(updates.style) ?? updates.style,
+      );
     }
     if (updates.name !== undefined) {
       await this.ctx.computeBridge.renameTable(tableName, updates.name);
@@ -587,8 +647,9 @@ export class WorksheetTablesImpl implements WorksheetTables {
     const table = await this.get(tableName);
     if (!table) throw new KernelError('COMPUTE_ERROR', `Table not found: ${tableName}`);
     await assertTableStyleAllowed(this.ctx, this.sheetId, 'tables.update.style', table);
-    await this.ctx.computeBridge.setTableStyle(tableName, preset);
-    this.emitTableUpdated(tableName, { style: this.tableStyleFromPreset(preset) });
+    const style = tableStyleIdForCompute(preset) ?? preset;
+    await this.ctx.computeBridge.setTableStyle(tableName, style);
+    this.emitTableUpdated(tableName, { style: this.tableStyleFromPreset(style) });
   }
 
   async resize(name: string, newRange: string | CellRange): Promise<TableResizeReceipt> {
@@ -699,7 +760,9 @@ export class WorksheetTablesImpl implements WorksheetTables {
       throw new KernelError('COMPUTE_ERROR', `Table not found: ${tableName}`);
     }
 
-    const cells = getTableColumnDataCellsFromInfo(table, colIndex);
+    const cells = [...getTableColumnDataCellsFromInfo(table, colIndex)].sort((a, b) =>
+      a.row === b.row ? a.col - b.col : a.row - b.row,
+    );
     await assertCalculatedColumnAllowed(
       this.ctx,
       this.sheetId,
@@ -707,11 +770,41 @@ export class WorksheetTablesImpl implements WorksheetTables {
       table,
       cells,
     );
-    await this.ctx.computeBridge.updateCalculatedColumn(tableName, colIndex, formula);
-    if (cells.length === 0) return;
-
-    const edits = cells.map(({ row, col }) => ({ row, col, input: toCellInput(formula) }));
-    await this.ctx.computeBridge.setCellsByPosition(this.sheetId, edits);
+    await this.ctx.computeBridge.beginUndoGroup();
+    try {
+      await this.ctx.computeBridge.updateCalculatedColumn(tableName, colIndex, formula);
+      if (cells.length > 0) {
+        const sourceCell = cells[0]!;
+        await this.ctx.computeBridge.setCellsByPosition(this.sheetId, [
+          { row: sourceCell.row, col: sourceCell.col, input: toCellInput(formula) },
+        ]);
+        if (cells.length > 1) {
+          const firstTargetCell = cells[1]!;
+          const lastCell = cells[cells.length - 1]!;
+          await FillOps.autoFill(
+            this.ctx,
+            this.sheetId,
+            {
+              startRow: sourceCell.row,
+              startCol: sourceCell.col,
+              endRow: sourceCell.row,
+              endCol: sourceCell.col,
+            },
+            {
+              startRow: firstTargetCell.row,
+              startCol: firstTargetCell.col,
+              endRow: lastCell.row,
+              endCol: lastCell.col,
+            },
+            'withoutFormats',
+            { undoGroup: false },
+          );
+        }
+      }
+    } finally {
+      await this.ctx.computeBridge.endUndoGroup();
+    }
+    this.emitTableUpdated(tableName);
   }
 
   async clearCalculatedColumn(tableName: string, colIndex: number): Promise<void> {

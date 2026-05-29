@@ -7,8 +7,11 @@
 
 import type { ActionHandler, ActionResult, AsyncActionHandler } from '@mog-sdk/contracts/actions';
 import type { CellValue, CellValuePrimitive } from '@mog-sdk/contracts/core';
+import { sheetId } from '@mog-sdk/contracts/core';
 import { parseA1, toA1 } from '@mog/spreadsheet-utils/a1';
 // Unified API: setCellValue replaced with ws.setCell in APPLY_GOAL_SEEK_RESULT
+import type { SpellingError } from '../../ui-store/slices/dialogs/spelling-dialog';
+import { requestFormulaBarRefresh } from '../../infra/events/formula-bar-refresh';
 import { guardBridgeMutation } from './bridge-error-guard';
 import { getUIStore } from './handler-utils';
 
@@ -19,8 +22,26 @@ import { getUIStore } from './handler-utils';
 /**
  * Open Goal Seek dialog
  */
-export const OPEN_GOAL_SEEK_DIALOG: ActionHandler = (deps): ActionResult => {
-  getUIStore(deps).getState().openGoalSeekDialog();
+export const OPEN_GOAL_SEEK_DIALOG: AsyncActionHandler = async (deps): Promise<ActionResult> => {
+  let setCell: string | undefined;
+  const activeCell = deps.accessors?.selection?.getActiveCell?.() ?? null;
+  const ranges = deps.accessors?.selection?.getRanges?.() ?? [];
+  if (
+    activeCell &&
+    ranges.length === 1 &&
+    ranges[0].startRow === ranges[0].endRow &&
+    ranges[0].startCol === ranges[0].endCol
+  ) {
+    const ws = deps.workbook.getSheetById(deps.getActiveSheetId());
+    const cell = await ws.getCell(activeCell.row, activeCell.col);
+    if (typeof cell?.formula === 'string' && cell.formula.length > 0) {
+      setCell = toA1(activeCell.row, activeCell.col);
+    }
+  }
+
+  getUIStore(deps)
+    .getState()
+    .openGoalSeekDialog(setCell ? { setCell } : undefined);
   return { handled: true };
 };
 
@@ -59,10 +80,21 @@ export const EXECUTE_GOAL_SEEK: AsyncActionHandler = async (deps): Promise<Actio
   try {
     const ws = deps.workbook.getSheetById(state.activeSheetId);
     const result = await ws.whatIf.goalSeek(setCell, targetValue, byChangingCell);
+    let achievedValue = result.value;
+    try {
+      const setPos = parseA1(setCell.toUpperCase());
+      const targetCell = await ws.getCell(setPos.row, setPos.col);
+      const targetCellValue = targetCell?.value;
+      if (typeof targetCellValue === 'number' && Number.isFinite(targetCellValue)) {
+        achievedValue = targetCellValue;
+      }
+    } catch {
+      // Keep the solver result if the target cell cannot be read as a finite raw numeric value.
+    }
     state.setGoalSeekResult({
       found: result.found,
       solutionValue: result.value,
-      achievedValue: result.value,
+      achievedValue,
       iterations: result.iterations ?? 0,
     });
   } catch (err) {
@@ -125,6 +157,25 @@ export const CANCEL_GOAL_SEEK: ActionHandler = (deps): ActionResult => {
   return { handled: true };
 };
 
+export const OPEN_FORECAST_SHEET_DIALOG: AsyncActionHandler = async (
+  deps,
+): Promise<ActionResult> => {
+  const activeCell = deps.accessors?.selection?.getActiveCell?.() ?? null;
+  const ranges = deps.accessors?.selection?.getRanges?.() ?? [];
+  const rangeLabel =
+    ranges.length === 1
+      ? `${toA1(ranges[0].startRow, ranges[0].startCol)}:${toA1(ranges[0].endRow, ranges[0].endCol)}`
+      : activeCell
+        ? toA1(activeCell.row, activeCell.col)
+        : 'the selected range';
+
+  await deps.platform.dialogs.alert(
+    `Forecast Sheet needs a selected time series with date/time values and numeric values. Current selection: ${rangeLabel}.`,
+    { type: 'info' },
+  );
+  return { handled: true };
+};
+
 // =============================================================================
 // Consolidate Dialog Handlers
 // =============================================================================
@@ -158,11 +209,78 @@ export const EXECUTE_CONSOLIDATE: ActionHandler = (_deps): ActionResult => {
 // Spelling Dialog Handlers
 // =============================================================================
 
+const SPELLING_SUGGESTIONS: Record<string, string[]> = {
+  mispeling: ['misspelling', 'spelling'],
+  mispelled: ['misspelled'],
+  teh: ['the'],
+  recieve: ['receive'],
+  seperate: ['separate'],
+  occured: ['occurred'],
+  untill: ['until'],
+  adress: ['address'],
+};
+
+function scanTextForSpellingErrors(
+  text: string,
+  sheetId: string,
+  row: number,
+  col: number,
+  ignoredWords: Set<string>,
+): SpellingError[] {
+  const errors: SpellingError[] = [];
+  const wordPattern = /[A-Za-z][A-Za-z']*/g;
+  for (const match of text.matchAll(wordPattern)) {
+    const word = match[0];
+    const key = word.toLowerCase();
+    if (!SPELLING_SUGGESTIONS[key] || ignoredWords.has(key)) continue;
+    errors.push({
+      word,
+      suggestions: SPELLING_SUGGESTIONS[key],
+      sheetId,
+      row,
+      col,
+      startIndex: match.index ?? 0,
+      length: word.length,
+    });
+  }
+  return errors;
+}
+
+function replaceSpan(value: string, error: SpellingError, replacement: string): string {
+  return (
+    value.slice(0, error.startIndex) + replacement + value.slice(error.startIndex + error.length)
+  );
+}
+
 /**
  * Open Spelling dialog and start spell check
  */
-export const OPEN_SPELLING_DIALOG: ActionHandler = (deps): ActionResult => {
-  getUIStore(deps).getState().openSpellingDialog();
+export const OPEN_SPELLING_DIALOG: AsyncActionHandler = async (deps): Promise<ActionResult> => {
+  const store = getUIStore(deps);
+  const state = store.getState();
+  state.openSpellingDialog();
+
+  const sheetId = state.activeSheetId;
+  const ws = deps.workbook.getSheetById(sheetId);
+  const ignoredWords = state.spellingDialog.ignoredWords;
+  const usedRange = await ws.getUsedRange();
+
+  if (!usedRange) {
+    store.getState().setSpellingErrors([]);
+    return { handled: true };
+  }
+
+  const errors: SpellingError[] = [];
+  for (let row = usedRange.startRow; row <= usedRange.endRow; row += 1) {
+    for (let col = usedRange.startCol; col <= usedRange.endCol; col += 1) {
+      const cell = await ws.getCell(row, col);
+      const value = cell?.value;
+      if (typeof value !== 'string' || value.startsWith('=')) continue;
+      errors.push(...scanTextForSpellingErrors(value, sheetId, row, col, ignoredWords));
+    }
+  }
+
+  store.getState().setSpellingErrors(errors);
   return { handled: true };
 };
 
@@ -185,18 +303,87 @@ export const SPELL_CHECK_NEXT: ActionHandler = (deps): ActionResult => {
 /**
  * Change current misspelled word to suggestion
  */
-export const SPELL_CHECK_CHANGE: ActionHandler = (deps): ActionResult => {
-  // TODO: Apply the replacement via domain module
-  getUIStore(deps).getState().resolveCurrentSpellingError();
+export const SPELL_CHECK_CHANGE: AsyncActionHandler = async (
+  deps,
+  payload?: { replacement?: string },
+): Promise<ActionResult> => {
+  const store = getUIStore(deps);
+  const state = store.getState();
+  const error = state.spellingDialog.currentError;
+  const replacement = payload?.replacement ?? state.spellingDialog.customReplacement;
+  if (!error || !replacement.trim()) return { handled: true };
+
+  const targetSheetId = sheetId(error.sheetId);
+  const ws = deps.workbook.getSheetById(targetSheetId);
+  const cell = await ws.getCell(error.row, error.col);
+  const value = typeof cell?.value === 'string' ? cell.value : '';
+  await ws.setCell(error.row, error.col, replaceSpan(value, error, replacement));
+  requestFormulaBarRefresh({
+    sheetIds: [targetSheetId],
+    ranges: [
+      {
+        startRow: error.row,
+        startCol: error.col,
+        endRow: error.row,
+        endCol: error.col,
+      },
+    ],
+  });
+  store.getState().resolveCurrentSpellingError();
   return { handled: true };
 };
 
 /**
  * Change all occurrences of misspelled word
  */
-export const SPELL_CHECK_CHANGE_ALL: ActionHandler = (_deps): ActionResult => {
-  // TODO: Apply replacement to all occurrences via domain module
-  return { handled: false, reason: 'not_implemented' };
+export const SPELL_CHECK_CHANGE_ALL: AsyncActionHandler = async (
+  deps,
+  payload?: { replacement?: string },
+): Promise<ActionResult> => {
+  const store = getUIStore(deps);
+  const state = store.getState();
+  const current = state.spellingDialog.currentError;
+  const replacement = payload?.replacement ?? state.spellingDialog.customReplacement;
+  if (!current || !replacement.trim()) return { handled: true };
+
+  const targetWord = current.word.toLowerCase();
+  const matchingErrors = state.spellingDialog.errors.filter(
+    (error) => error.word.toLowerCase() === targetWord,
+  );
+  const errorsByCell = new Map<string, SpellingError[]>();
+  for (const error of matchingErrors) {
+    const key = `${error.sheetId}:${error.row}:${error.col}`;
+    errorsByCell.set(key, [...(errorsByCell.get(key) ?? []), error]);
+  }
+
+  for (const cellErrors of errorsByCell.values()) {
+    const first = cellErrors[0];
+    const targetSheetId = sheetId(first.sheetId);
+    const ws = deps.workbook.getSheetById(targetSheetId);
+    const cell = await ws.getCell(first.row, first.col);
+    let value = typeof cell?.value === 'string' ? cell.value : '';
+    for (const error of [...cellErrors].sort((a, b) => b.startIndex - a.startIndex)) {
+      value = replaceSpan(value, error, replacement);
+    }
+    await ws.setCell(first.row, first.col, value);
+    requestFormulaBarRefresh({
+      sheetIds: [targetSheetId],
+      ranges: [
+        {
+          startRow: first.row,
+          startCol: first.col,
+          endRow: first.row,
+          endCol: first.col,
+        },
+      ],
+    });
+  }
+
+  store.getState().ignoreAllSpellingWord();
+  for (let i = 0; i < matchingErrors.length; i += 1) {
+    store.getState().incrementSpellingChangesCount();
+  }
+  return { handled: true };
 };
 
 /**

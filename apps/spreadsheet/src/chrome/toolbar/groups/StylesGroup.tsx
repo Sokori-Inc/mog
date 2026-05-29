@@ -32,15 +32,13 @@
  */
 
 import React, { useCallback, useEffect } from 'react';
-import { useActiveSheetId, useFeatureGate, useUIStore, useWorkbook } from '../../../internal-api';
+import { useFeatureGate, useUIStore } from '../../../internal-api';
 
 import { Tooltip } from '@mog/shell';
 import type { TableStylePreset } from '@mog-sdk/contracts/tables';
 import { STYLES_COLLAPSE_CONFIG } from '@mog-sdk/contracts/ribbon';
-import { cellRangeToA1 } from '@mog/spreadsheet-utils/a1';
 import { StyleGallery } from '../../../components/pickers/StyleGallery';
 import { TableStyleGallery } from '../../../components/pickers/TableStyleGallery';
-import { useCoordinator } from '../../../hooks/shared/use-coordinator';
 import { useDispatch } from '../../../hooks/toolbar/use-action-dependencies';
 import { useToolbarActions } from '../../../hooks/toolbar/use-toolbar-actions';
 import { ConditionalFormattingMenu } from '../galleries/ConditionalFormattingMenu';
@@ -49,6 +47,7 @@ import { RibbonButton } from '../primitives/RibbonButton';
 import { RibbonDropdownPanel } from '../primitives/RibbonDropdown';
 import { ToolbarGroup } from '../primitives/ToolbarGroup';
 import { ConditionalFormatIcon, DropdownArrowIcon } from '../primitives/ToolbarIcons';
+import { RibbonVisibilityItem } from '../visibility/RibbonVisibilityContext';
 
 // =============================================================================
 // Icons
@@ -175,47 +174,11 @@ export const StylesGroup = React.memo(function StylesGroup() {
   // for a follow-up cleanup.
   const { handleApplyStyle } = useToolbarActions();
 
-  // formatAsTable: reads selection on-demand via coordinator, then writes via
-  // ws.tables.add. Same caveat — needs FORMAT_AS_TABLE action in a follow-up.
-  const wb = useWorkbook();
-  const activeSheetId = useActiveSheetId();
-  const ws = wb.getSheetById(activeSheetId);
-  const coordinator = useCoordinator();
-
   const formatAsTable = useCallback(
     (styleId: TableStylePreset) => {
-      const { ranges } = coordinator.grid.getSelectionSnapshot();
-      if (ranges.length === 0) return;
-
-      const range = ranges[0];
-      const normalizedRange = {
-        sheetId: activeSheetId,
-        startRow: Math.min(range.startRow, range.endRow),
-        endRow: Math.max(range.startRow, range.endRow),
-        startCol: Math.min(range.startCol, range.endCol),
-        endCol: Math.max(range.startCol, range.endCol),
-      };
-
-      const rowCount = normalizedRange.endRow - normalizedRange.startRow + 1;
-      if (rowCount < 1) {
-        console.warn('Cannot create table: selection must have at least 1 row');
-        return;
-      }
-
-      try {
-        const rangeA1 = cellRangeToA1(normalizedRange);
-        const tableName = `Table${Date.now()}`;
-        void ws.tables
-          .add(rangeA1, { name: tableName, hasHeaders: true, style: styleId })
-          .then((tableInfo) => {
-            const name = tableInfo.name;
-            void ws.tables.setShowBandedRows(name, true);
-          });
-      } catch (error) {
-        console.error('Failed to create table:', error);
-      }
+      void dispatch('INSERT_TABLE', { stylePreset: styleId });
     },
-    [ws, activeSheetId, coordinator],
+    [dispatch],
   );
 
   // applyStyle: dispatch CLEAR_FORMATS for "normal", else delegate to
@@ -340,61 +303,63 @@ export const StylesGroup = React.memo(function StylesGroup() {
         </div>
 
         {/* Quick-Pick Style Chips + Cell Styles Dropdown */}
-        <div className="relative inline-flex flex-col items-start h-[var(--ribbon-content-height)] justify-between py-1">
-          {/* 2x2 Grid of style preview chips */}
-          <div className="flex flex-wrap content-start gap-0.5 w-[92px]">
-            {QUICK_PICK_STYLES.map((style) => (
-              <StylePreviewChip
-                key={style.name}
-                styleId={style.id}
-                name={style.name}
-                bgColor={style.bgColor}
-                textColor={style.textColor}
-                borderColor={style.borderColor}
-                onClick={() => handleQuickStyleClick(style.id)}
-              />
-            ))}
-          </div>
+        <RibbonVisibilityItem item="cellStyles">
+          <div className="relative inline-flex flex-col items-start h-[var(--ribbon-content-height)] justify-between py-1">
+            {/* 2x2 Grid of style preview chips */}
+            <div className="flex flex-wrap content-start gap-0.5 w-[92px]">
+              {QUICK_PICK_STYLES.map((style) => (
+                <StylePreviewChip
+                  key={style.name}
+                  styleId={style.id}
+                  name={style.name}
+                  bgColor={style.bgColor}
+                  textColor={style.textColor}
+                  borderColor={style.borderColor}
+                  onClick={() => handleQuickStyleClick(style.id)}
+                />
+              ))}
+            </div>
 
-          {/* Cell Styles dropdown button */}
-          <Tooltip title="Cell Styles" description="Apply predefined cell styles">
-            <button
-              type="button"
-              data-testid="ribbon-dropdown-cell-styles"
-              onClick={() => setStyleGalleryOpen(!styleGalleryOpen)}
-              className="
+            {/* Cell Styles dropdown button */}
+            <Tooltip title="Cell Styles" description="Apply predefined cell styles">
+              <button
+                type="button"
+                data-testid="ribbon-dropdown-cell-styles"
+                onClick={() => setStyleGalleryOpen(!styleGalleryOpen)}
+                className="
  flex items-center gap-0.5 px-1 py-0.5
  text-ribbon text-ss-text-secondary
  rounded cursor-pointer
  hover:bg-ss-surface-hover
  transition-all duration-ss-fast
  "
-              aria-label="Cell Styles"
-              aria-expanded={styleGalleryOpen}
-              aria-haspopup="menu"
-            >
-              <span>Cell Styles</span>
-              <DropdownArrowIcon className={styleGalleryOpen ? 'rotate-180' : ''} />
-            </button>
-          </Tooltip>
+                aria-label="Cell Styles"
+                aria-expanded={styleGalleryOpen}
+                aria-haspopup="menu"
+              >
+                <span>Cell Styles</span>
+                <DropdownArrowIcon className={styleGalleryOpen ? 'rotate-180' : ''} />
+              </button>
+            </Tooltip>
 
-          {/* Cell Styles Gallery Dropdown */}
-          <RibbonDropdownPanel
-            open={styleGalleryOpen}
-            onClose={() => setStyleGalleryOpen(false)}
-            position="bottom-right"
-          >
-            <div data-testid="ribbon-dropdown-menu-cell-styles">
-              <StyleGallery
-                onSelectStyle={(styleId) => {
-                  applyStyle(styleId);
-                  setStyleGalleryOpen(false);
-                }}
-                onClose={() => setStyleGalleryOpen(false)}
-              />
-            </div>
-          </RibbonDropdownPanel>
-        </div>
+            {/* Cell Styles Gallery Dropdown */}
+            <RibbonDropdownPanel
+              open={styleGalleryOpen}
+              onClose={() => setStyleGalleryOpen(false)}
+              position="bottom-right"
+            >
+              <div data-testid="ribbon-dropdown-menu-cell-styles">
+                <StyleGallery
+                  onSelectStyle={(styleId) => {
+                    applyStyle(styleId);
+                    setStyleGalleryOpen(false);
+                  }}
+                  onClose={() => setStyleGalleryOpen(false)}
+                />
+              </div>
+            </RibbonDropdownPanel>
+          </div>
+        </RibbonVisibilityItem>
       </div>
     </ToolbarGroup>
   );

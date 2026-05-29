@@ -385,6 +385,10 @@ export interface ParsedDateInput {
   serial: number;
   suggested_format: string;
 }
+export interface FormulaCircularReferenceValidation {
+  cellAddress: string;
+  formula: string;
+}
 /** Date component ordering for locale-aware formatting. */
 export type DateOrder = 'MDY' | 'DMY' | 'YMD';
 
@@ -544,6 +548,7 @@ export interface CFIconThresholdWire {
 export interface CFIconSetWire {
   iconSetName: CfIconSetName;
   thresholds: CFIconThresholdWire[];
+  percent?: boolean;
   reverseOrder?: boolean;
   showIconOnly?: boolean;
 }
@@ -835,7 +840,7 @@ export interface CellMetadata {
   validation?: string;
   connectionId?: string;
   s?: number;
-  cm?: boolean;
+  cm?: number;
   vm?: number;
   formulaResultType?: number;
   sstIndex?: number;

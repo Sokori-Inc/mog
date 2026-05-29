@@ -61,6 +61,12 @@ export interface UnifiedPasteDeps {
    * silently when the clipboard contains only images.
    */
   pasteImage?: (blob: Blob, anchorCell: CellCoord) => Promise<void>;
+  /**
+   * Wait until the clipboard machine's paste side effect has committed.
+   * `unifiedPaste` only routes the paste event; spreadsheet mutations run in
+   * the grid-editing paste integration after the machine enters `pasting`.
+   */
+  waitForPasteCommit?: () => Promise<void>;
   /** Read the persisted user default for normal paste. */
   readPasteDefaultsPreference?: () => unknown;
 }
@@ -80,6 +86,10 @@ const IMAGE_MIME_TYPES = [
   'image/bmp',
 ] as const;
 
+function normalizeClipboardSignature(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n$/, '');
+}
+
 function resolveNormalPasteOptions(
   deps: UnifiedPasteDeps,
   context: PasteDefaultContext,
@@ -89,6 +99,11 @@ function resolveNormalPasteOptions(
     context,
   );
   return resolved.appliesDefault ? resolved.options : undefined;
+}
+
+async function routePasteCommand(command: () => void, deps: UnifiedPasteDeps): Promise<void> {
+  command();
+  await deps.waitForPasteCommit?.();
 }
 
 /**
@@ -132,6 +147,19 @@ export async function unifiedPaste(
   deps: UnifiedPasteDeps,
   options?: PasteSpecialOptions,
 ): Promise<void> {
+  const initialClipboardState = deps.getClipboardSnapshot();
+  const initialClipboardData = clipboardSelectors.data(initialClipboardState);
+  let pendingPreviewShown = false;
+  if (initialClipboardData) {
+    deps.commands.showPastePreview(activeCell);
+    pendingPreviewShown = true;
+  }
+  const hidePendingPreview = () => {
+    if (!pendingPreviewShown) return;
+    deps.commands.hidePastePreview();
+    pendingPreviewShown = false;
+  };
+
   // 1. Read system clipboard (async operation).
   // Prefer the full Clipboard API (navigator.clipboard.read) so we can pick
   // up the `text/html` payload alongside `text/plain`. The HTML payload
@@ -195,6 +223,7 @@ export async function unifiedPaste(
         sourceKind: 'external-image',
       },
     );
+    hidePendingPreview();
     await deps.pasteImage(imageBlob, activeCell);
     return;
   }
@@ -206,7 +235,16 @@ export async function unifiedPaste(
 
   // If system clipboard matches our text signature, use rich internal data (preserves formulas, formats)
   // Empty string check prevents matching when both are empty
-  const isOurClipboard = clipboardData?.textSignature === systemText && systemText !== '';
+  const internalSignature = clipboardData?.textSignature
+    ? normalizeClipboardSignature(clipboardData.textSignature)
+    : '';
+  const systemSignature = normalizeClipboardSignature(systemText);
+  const hasFreshInternalClipboard =
+    Boolean(clipboardData?.textSignature) &&
+    clipboardData?.sourceSheetId !== EXTERNAL_SOURCE_SHEET_ID &&
+    clipboardState.context.isStale !== true;
+  const isOurClipboard =
+    (internalSignature === systemSignature && systemSignature !== '') || hasFreshInternalClipboard;
 
   // 3. Route to appropriate paste method
   if (clipboardData && isOurClipboard) {
@@ -217,14 +255,21 @@ export async function unifiedPaste(
           sourceKind: 'external-text',
           hasExternalText: true,
         });
-      if (shouldNoopExternalFormatsPaste(resolvedOptions)) return;
-      deps.commands.externalPaste({
-        text: clipboardData.textSignature ?? systemText,
-        targetCell: activeCell,
-        options: resolvedOptions,
-      });
+      if (shouldNoopExternalFormatsPaste(resolvedOptions)) {
+        hidePendingPreview();
+        return;
+      }
+      await routePasteCommand(
+        () =>
+          deps.commands.externalPaste({
+            text: clipboardData.textSignature ?? systemText,
+            targetCell: activeCell,
+            options: resolvedOptions,
+          }),
+        deps,
+      );
     } else if (options) {
-      deps.commands.pasteSpecial(activeCell, options);
+      await routePasteCommand(() => deps.commands.pasteSpecial(activeCell, options), deps);
     } else if (isCut) {
       resolveDefaultPasteOptions(
         (deps.readPasteDefaultsPreference ?? readPasteDefaultsPreference)(),
@@ -233,16 +278,19 @@ export async function unifiedPaste(
           hasInternalRichData: true,
         },
       );
-      deps.commands.paste(activeCell);
+      await routePasteCommand(() => deps.commands.paste(activeCell), deps);
     } else {
       const resolvedOptions = resolveNormalPasteOptions(deps, {
         sourceKind: 'internal-copy',
         hasInternalRichData: true,
       });
       if (resolvedOptions) {
-        deps.commands.pasteSpecial(activeCell, resolvedOptions);
+        await routePasteCommand(
+          () => deps.commands.pasteSpecial(activeCell, resolvedOptions),
+          deps,
+        );
       } else {
-        deps.commands.paste(activeCell);
+        await routePasteCommand(() => deps.commands.paste(activeCell), deps);
       }
     }
     return;
@@ -261,13 +309,20 @@ export async function unifiedPaste(
         hasExternalHtml: Boolean(systemHTML),
         hasExternalText: Boolean(systemText),
       });
-    if (shouldNoopExternalFormatsPaste(resolvedOptions, systemHTML)) return;
-    deps.commands.externalPaste({
-      text: systemText,
-      targetCell: activeCell,
-      html: systemHTML,
-      options: resolvedOptions,
-    });
+    if (shouldNoopExternalFormatsPaste(resolvedOptions, systemHTML)) {
+      hidePendingPreview();
+      return;
+    }
+    await routePasteCommand(
+      () =>
+        deps.commands.externalPaste({
+          text: systemText,
+          targetCell: activeCell,
+          html: systemHTML,
+          options: resolvedOptions,
+        }),
+      deps,
+    );
     return;
   }
 
@@ -282,14 +337,21 @@ export async function unifiedPaste(
           sourceKind: 'external-text',
           hasExternalText: true,
         });
-      if (shouldNoopExternalFormatsPaste(resolvedOptions)) return;
-      deps.commands.externalPaste({
-        text: clipboardData.textSignature ?? '',
-        targetCell: activeCell,
-        options: resolvedOptions,
-      });
+      if (shouldNoopExternalFormatsPaste(resolvedOptions)) {
+        hidePendingPreview();
+        return;
+      }
+      await routePasteCommand(
+        () =>
+          deps.commands.externalPaste({
+            text: clipboardData.textSignature ?? '',
+            targetCell: activeCell,
+            options: resolvedOptions,
+          }),
+        deps,
+      );
     } else if (options) {
-      deps.commands.pasteSpecial(activeCell, options);
+      await routePasteCommand(() => deps.commands.pasteSpecial(activeCell, options), deps);
     } else if (isCut) {
       resolveDefaultPasteOptions(
         (deps.readPasteDefaultsPreference ?? readPasteDefaultsPreference)(),
@@ -298,16 +360,19 @@ export async function unifiedPaste(
           hasInternalRichData: true,
         },
       );
-      deps.commands.paste(activeCell);
+      await routePasteCommand(() => deps.commands.paste(activeCell), deps);
     } else {
       const resolvedOptions = resolveNormalPasteOptions(deps, {
         sourceKind: 'internal-copy',
         hasInternalRichData: true,
       });
       if (resolvedOptions) {
-        deps.commands.pasteSpecial(activeCell, resolvedOptions);
+        await routePasteCommand(
+          () => deps.commands.pasteSpecial(activeCell, resolvedOptions),
+          deps,
+        );
       } else {
-        deps.commands.paste(activeCell);
+        await routePasteCommand(() => deps.commands.paste(activeCell), deps);
       }
     }
   }

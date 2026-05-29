@@ -6,8 +6,7 @@
 use cell_types::SheetId;
 use compute_document::schema::*;
 use domain_types::{
-    ColDimension, RoundTripContext, RowDimension, SheetDimensions, domain::table::TableSpec,
-    yrs_schema,
+    ColDimension, RowDimension, RowXmlHints, SheetDimensions, domain::table::TableSpec, yrs_schema,
 };
 use yrs::{Map, Out, Transact};
 
@@ -28,7 +27,6 @@ use crate::storage::sheet::{dimensions, settings};
 pub(in crate::storage::engine) fn export_dimensions_for_sheet(
     stores: &EngineStores,
     mirror: &CellMirror,
-    round_trip_context: Option<&RoundTripContext>,
     sheet_id: &SheetId,
     override_max_col: Option<u32>,
 ) -> SheetDimensions {
@@ -66,6 +64,87 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
         let txn = stores.storage.doc().transact();
         get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
             .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "rowCustomFormat"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+
+    let row_outline_levels: std::collections::HashMap<u32, u8> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| {
+                yrs_schema::helpers::read_json_vec::<_, (u32, u8)>(&m, &txn, "rowOutlineLevels")
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let explicit_hidden_rows: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "rowExplicitHidden"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let explicit_outline_zero_rows: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| {
+                yrs_schema::helpers::read_json_vec::<_, u32>(
+                    &m,
+                    &txn,
+                    "rowExplicitOutlineLevelZero",
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let row_collapsed: std::collections::HashMap<u32, bool> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, (u32, bool)>(&m, &txn, "rowCollapsed"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let row_thick_top: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "rowThickTop"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let row_thick_bot: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "rowThickBot"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let row_phonetic: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "rowPhonetic"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let row_spans: std::collections::HashMap<u32, String> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, (u32, String)>(&m, &txn, "rowSpans"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let bare_empty_rows: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "bareEmptyRows"))
             .unwrap_or_default()
             .into_iter()
             .collect()
@@ -109,7 +188,16 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
             Some(height) => {
                 let differs = (height.0 - default_row_height.0).abs() > 0.01;
                 let is_custom_height = custom_height_rows.contains(&row);
-                if differs || is_hidden || is_custom_height || is_custom_format {
+                let has_metadata = row_outline_levels.contains_key(&row)
+                    || explicit_hidden_rows.contains(&row)
+                    || explicit_outline_zero_rows.contains(&row)
+                    || row_collapsed.contains_key(&row)
+                    || row_thick_top.contains(&row)
+                    || row_thick_bot.contains(&row)
+                    || row_phonetic.contains(&row)
+                    || row_spans.contains_key(&row)
+                    || bare_empty_rows.contains(&row);
+                if differs || is_hidden || is_custom_height || is_custom_format || has_metadata {
                     // When height matches default and the row is only included
                     // for custom_format (not for height/hidden/customHeight),
                     // use 0.0 to avoid emitting a spurious ht="<default>".
@@ -121,10 +209,22 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
                     row_heights.push(RowDimension {
                         row,
                         height: emit_height,
+                        height_str: None,
                         custom_height: is_custom_height,
                         hidden: is_hidden,
+                        explicit_hidden: explicit_hidden_rows.contains(&row),
                         custom_format: is_custom_format,
+                        outline_level: row_outline_levels.get(&row).copied(),
+                        explicit_outline_level_zero: explicit_outline_zero_rows.contains(&row),
+                        collapsed: row_collapsed.get(&row).copied(),
+                        thick_top: row_thick_top.contains(&row),
+                        thick_bot: row_thick_bot.contains(&row),
+                        phonetic: row_phonetic.contains(&row),
                         descent: None,
+                        xml_hints: RowXmlHints {
+                            spans: row_spans.get(&row).cloned(),
+                            bare_empty: bare_empty_rows.contains(&row),
+                        },
                     });
                 }
             }
@@ -133,7 +233,16 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
                 // customHeight (the height may match the default but
                 // customHeight="1" still needs to be preserved).
                 let is_custom_height = custom_height_rows.contains(&row);
-                if is_hidden || is_custom_height || is_custom_format {
+                let has_metadata = row_outline_levels.contains_key(&row)
+                    || explicit_hidden_rows.contains(&row)
+                    || explicit_outline_zero_rows.contains(&row)
+                    || row_collapsed.contains_key(&row)
+                    || row_thick_top.contains(&row)
+                    || row_thick_bot.contains(&row)
+                    || row_phonetic.contains(&row)
+                    || row_spans.contains_key(&row)
+                    || bare_empty_rows.contains(&row);
+                if is_hidden || is_custom_height || is_custom_format || has_metadata {
                     // Use 0.0 for height when no explicit height is stored.
                     // The sheet_builder skips ht= when height is 0.0 and
                     // custom_height is false, which avoids emitting a
@@ -146,10 +255,22 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
                     row_heights.push(RowDimension {
                         row,
                         height,
+                        height_str: None,
                         custom_height: is_custom_height,
                         hidden: is_hidden,
+                        explicit_hidden: explicit_hidden_rows.contains(&row),
                         custom_format: is_custom_format,
+                        outline_level: row_outline_levels.get(&row).copied(),
+                        explicit_outline_level_zero: explicit_outline_zero_rows.contains(&row),
+                        collapsed: row_collapsed.get(&row).copied(),
+                        thick_top: row_thick_top.contains(&row),
+                        thick_bot: row_thick_bot.contains(&row),
+                        phonetic: row_phonetic.contains(&row),
                         descent: None,
+                        xml_hints: RowXmlHints {
+                            spans: row_spans.get(&row).cloned(),
+                            bare_empty: bare_empty_rows.contains(&row),
+                        },
                     });
                 }
             }
@@ -180,10 +301,22 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
                 row_heights.push(RowDimension {
                     row,
                     height: 0.0,
+                    height_str: None,
                     custom_height: false,
                     hidden: false,
+                    explicit_hidden: explicit_hidden_rows.contains(&row),
                     custom_format: custom_format_rows.contains(&row),
+                    outline_level: row_outline_levels.get(&row).copied(),
+                    explicit_outline_level_zero: explicit_outline_zero_rows.contains(&row),
+                    collapsed: row_collapsed.get(&row).copied(),
+                    thick_top: row_thick_top.contains(&row),
+                    thick_bot: row_thick_bot.contains(&row),
+                    phonetic: row_phonetic.contains(&row),
                     descent: Some(descent),
+                    xml_hints: RowXmlHints {
+                        spans: row_spans.get(&row).cloned(),
+                        bare_empty: bare_empty_rows.contains(&row),
+                    },
                 });
             }
         }
@@ -201,10 +334,6 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
     };
 
     // Read customWidth column set from meta.
-    // When round-trip context is available (XLSX import), use stored flags
-    // exclusively — the `width_differs` fallback would spuriously mark default
-    // columns as custom when their width differs from the Yrs default (64.0).
-    let has_roundtrip_ctx = round_trip_context.is_some();
     let custom_width_cols: std::collections::HashSet<u32> = {
         let txn = stores.storage.doc().transact();
         get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
@@ -219,6 +348,15 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
         let txn = stores.storage.doc().transact();
         get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
             .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "colCollapsed"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+
+    let phonetic_cols: std::collections::HashSet<u32> = {
+        let txn = stores.storage.doc().transact();
+        get_meta_for_export(&txn, stores.storage.sheets(), sheet_id)
+            .map(|m| yrs_schema::helpers::read_json_vec::<_, u32>(&m, &txn, "colPhonetic"))
             .unwrap_or_default()
             .into_iter()
             .collect()
@@ -241,6 +379,7 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
             stores.grid_indexes.get(sheet_id),
         );
         let is_best_fit = best_fit_cols.contains(&col);
+        let is_phonetic = phonetic_cols.contains(&col);
 
         // Only emit a <col> entry if there's an explicit stored width, or the
         // column is hidden/bestFit. Columns with no stored width inherit the
@@ -249,39 +388,54 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
             Some(width) => {
                 let is_custom_width = custom_width_cols.contains(&col);
                 let width_differs = (width.0 - default_col_width.0).abs() > 0.01;
-                // During round-trip, trust the stored customWidth flags exclusively.
-                // Without this, columns with a non-default width (e.g., 10.83 from
-                // baseColWidth=10) that were NOT marked as customWidth in the original
-                // XLSX get spuriously marked because their width differs from Yrs's
-                // internal default (64.0).
-                let custom = if has_roundtrip_ctx {
-                    is_custom_width
-                } else {
-                    is_custom_width || width_differs
-                };
+                let custom = is_custom_width || width_differs;
                 let is_collapsed = collapsed_cols.contains(&col);
-                if custom || width_differs || is_hidden || is_best_fit || is_collapsed {
+                if custom
+                    || width_differs
+                    || is_hidden
+                    || is_best_fit
+                    || is_collapsed
+                    || is_phonetic
+                {
                     col_widths.push(ColDimension {
                         col,
                         width: width.0,
+                        width_str: None,
+                        width_present: Some(true),
                         custom_width: custom,
+                        custom_width_attr: custom.then_some(true),
                         hidden: is_hidden,
+                        hidden_attr: is_hidden.then_some(true),
                         best_fit: is_best_fit,
+                        best_fit_attr: is_best_fit.then_some(true),
+                        outline_level: None,
                         collapsed: is_collapsed,
+                        collapsed_attr: is_collapsed.then_some(true),
+                        phonetic: is_phonetic,
+                        phonetic_attr: is_phonetic.then_some(true),
                     });
                 }
             }
             None => {
                 // No explicit width stored — only emit if hidden, bestFit, or collapsed
                 let is_collapsed = collapsed_cols.contains(&col);
-                if is_hidden || is_best_fit || is_collapsed {
+                if is_hidden || is_best_fit || is_collapsed || is_phonetic {
                     col_widths.push(ColDimension {
                         col,
                         width: default_col_width.0,
+                        width_str: None,
+                        width_present: Some(true),
                         custom_width: false,
+                        custom_width_attr: None,
                         hidden: is_hidden,
+                        hidden_attr: is_hidden.then_some(true),
                         best_fit: is_best_fit,
+                        best_fit_attr: is_best_fit.then_some(true),
+                        outline_level: None,
                         collapsed: is_collapsed,
+                        collapsed_attr: is_collapsed.then_some(true),
+                        phonetic: is_phonetic,
+                        phonetic_attr: is_phonetic.then_some(true),
                     });
                 }
             }
@@ -321,6 +475,9 @@ pub(in crate::storage::engine) fn export_dimensions_for_sheet(
         default_row_descent,
         base_col_width: rt_meta.base_col_width,
         custom_height: rt_meta.custom_height,
+        zero_height: rt_meta.zero_height,
+        thick_top: rt_meta.thick_top,
+        thick_bottom: rt_meta.thick_bottom,
         outline_level_row: rt_meta.outline_level_row,
         outline_level_col: rt_meta.outline_level_col,
         row_heights,

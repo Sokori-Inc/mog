@@ -3,6 +3,7 @@
 //! compute-pivot.
 
 use serde::{Deserialize, Serialize};
+use value_types::FiniteF64;
 
 use crate::field::PivotField;
 use crate::filter_types::PivotFilter;
@@ -66,10 +67,10 @@ pub struct PivotEngineConfig {
     pub data_options: Option<PivotTableDataOptions>,
     /// Timestamp when the pivot table was created.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<f64>,
+    pub created_at: Option<FiniteF64>,
     /// Timestamp when the pivot table was last updated.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<f64>,
+    pub updated_at: Option<FiniteF64>,
     /// Calculated fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calculated_fields: Option<Vec<CalculatedField>>,
@@ -85,15 +86,27 @@ pub struct PivotEngineConfig {
     /// Pivot cache ID this table reads from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_id: Option<u32>,
+    /// OOXML data-axis placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_on_rows: Option<bool>,
     /// OOXML rendered pivot range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_range: Option<String>,
     /// OOXML first data row offset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_data_row: Option<u32>,
+    /// OOXML first header row offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_header_row: Option<u32>,
     /// OOXML first data column offset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_data_col: Option<u32>,
+    /// OOXML row page count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_per_page: Option<u32>,
+    /// OOXML column page count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols_per_page: Option<u32>,
     /// Row items array for OOXML layout reconstruction.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_items: Vec<domain_types::domain::pivot::PivotRowColItem>,
@@ -125,16 +138,28 @@ impl TryFrom<PivotTableConfig> for PivotEngineConfig {
             layout: config.layout,
             style: config.style,
             data_options: config.data_options,
-            created_at: config.created_at,
-            updated_at: config.updated_at,
+            created_at: config
+                .created_at
+                .map(FiniteF64::try_from)
+                .transpose()
+                .map_err(|_| "created_at must be finite".to_string())?,
+            updated_at: config
+                .updated_at
+                .map(FiniteF64::try_from)
+                .transpose()
+                .map_err(|_| "updated_at must be finite".to_string())?,
             calculated_fields: config.calculated_fields,
             allow_multiple_filters_per_field: config.allow_multiple_filters_per_field,
             auto_format: config.auto_format,
             preserve_formatting: config.preserve_formatting,
             cache_id: config.cache_id,
+            data_on_rows: config.data_on_rows,
             ref_range: config.ref_range,
             first_data_row: config.first_data_row,
+            first_header_row: config.first_header_row,
             first_data_col: config.first_data_col,
+            rows_per_page: config.rows_per_page,
+            cols_per_page: config.cols_per_page,
             row_items: config.row_items,
             col_items: config.col_items,
         })
@@ -162,16 +187,20 @@ impl From<PivotEngineConfig> for PivotTableConfig {
             layout: config.layout,
             style: config.style,
             data_options: config.data_options,
-            created_at: config.created_at,
-            updated_at: config.updated_at,
+            created_at: config.created_at.map(f64::from),
+            updated_at: config.updated_at.map(f64::from),
             calculated_fields: config.calculated_fields,
             allow_multiple_filters_per_field: config.allow_multiple_filters_per_field,
             auto_format: config.auto_format,
             preserve_formatting: config.preserve_formatting,
             cache_id: config.cache_id,
+            data_on_rows: config.data_on_rows,
             ref_range: config.ref_range,
             first_data_row: config.first_data_row,
+            first_header_row: config.first_header_row,
             first_data_col: config.first_data_col,
+            rows_per_page: config.rows_per_page,
+            cols_per_page: config.cols_per_page,
             row_items: config.row_items,
             col_items: config.col_items,
         }

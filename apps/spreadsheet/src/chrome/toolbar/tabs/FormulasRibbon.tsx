@@ -25,6 +25,7 @@ import {
 } from '../../../internal-api';
 
 import { ChevronDownSvg } from '@mog/icons';
+import type { CalculationSettings } from '@mog-sdk/contracts/core';
 import {
   CALCULATION_COLLAPSE_CONFIG,
   DEFINED_NAMES_COLLAPSE_CONFIG,
@@ -50,6 +51,7 @@ import {
   DateTimeFunctionIcon,
   DefineNameIcon,
   ErrorCheckingIcon,
+  EvaluateFormulaIcon,
   FinancialFunctionIcon,
   LogicalFunctionIcon,
   LookupFunctionIcon,
@@ -59,6 +61,7 @@ import {
   RemoveArrowsIcon,
   TextFunctionIcon,
   UseInFormulaIcon,
+  WatchWindowIcon,
 } from '../primitives/FormulasIcons';
 import { RibbonButton } from '../primitives/RibbonButton';
 import {
@@ -77,6 +80,7 @@ import {
   TraceDependentsIcon,
   TracePrecedentsIcon,
 } from '../primitives/ToolbarIcons';
+import { RibbonVisibilityItem } from '../visibility/RibbonVisibilityContext';
 
 // =============================================================================
 // Function Category Data
@@ -654,10 +658,10 @@ export function FormulasRibbon() {
   const deps = useActionDependencies();
   const activeSheetId = useActiveSheetId();
   const { viewOptions } = useSheetViewOptions(activeSheetId);
-  const { settings: workbookSettings, setSetting } = useWorkbookSettings();
+  const { settings: workbookSettings } = useWorkbookSettings();
 
   // UI Store - READ ONLY selectors (mutations go through dispatch)
-  const calculationSettings = workbookSettings.calculationSettings ?? {
+  const calculationSettings: CalculationSettings = workbookSettings.calculationSettings ?? {
     enableIterativeCalculation: false,
     maxIterations: 100,
     maxChange: 0.001,
@@ -665,6 +669,13 @@ export function FormulasRibbon() {
     fullPrecision: true,
     r1c1Mode: false,
     fullCalcOnLoad: false,
+    calcCompleted: true,
+    calcOnSave: true,
+    concurrentCalc: true,
+    concurrentManualCount: null,
+    forceFullCalc: false,
+    hasExplicitIterateCount: false,
+    hasExplicitIterateDelta: false,
   };
   const calculationMode = calculationSettings.calcMode === 'manual' ? 'manual' : 'auto';
   const iterativeCalculationEnabled = calculationSettings.enableIterativeCalculation === true;
@@ -672,8 +683,7 @@ export function FormulasRibbon() {
 
   // Workbook API for recalculation
   const wb = useWorkbook();
-  const setSidePanelContent = useUIStore((s) => s.setSidePanelContent);
-  const setSidePanelVisible = useUIStore((s) => s.setSidePanelVisible);
+  const mruFunctions = useUIStore((s) => s.mruFunctions);
 
   // AutoSum dispatch hook
   const dispatchAction = useDispatch();
@@ -690,11 +700,14 @@ export function FormulasRibbon() {
 
   // Dropdown states (F1)
   const [autoSumOpen, setAutoSumOpen] = useState(false);
+  const [recentlyUsedOpen, setRecentlyUsedOpen] = useState(false);
 
   // Remove Arrows dropdown state (B2.5)
   const [removeArrowsOpen, setRemoveArrowsOpen] = useState(false);
   const [lookupOpen, setLookupOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [useInFormulaOpen, setUseInFormulaOpen] = useState(false);
+  const [definedNames, setDefinedNames] = useState<Array<{ name: string; scope?: string }>>([]);
 
   // function-category dropdowns lifted into the ribbonDropdowns slice
   // so the keytip chord (Alt+M,F/L/T/D/G) can open them via OPEN_RIBBON_DROPDOWN.
@@ -731,6 +744,35 @@ export function FormulasRibbon() {
     [openRibbonDropdown, closeRibbonDropdown],
   );
 
+  const refreshDefinedNames = useCallback(async () => {
+    try {
+      const names = await wb.names.list();
+      setDefinedNames(
+        names
+          .filter((name) => name.visible !== false)
+          .map((name) => ({ name: name.name, scope: name.scope })),
+      );
+    } catch (error) {
+      console.error('Failed to load defined names:', error);
+      setDefinedNames([]);
+    }
+  }, [wb]);
+
+  useEffect(() => {
+    if (useInFormulaOpen) {
+      void refreshDefinedNames();
+    }
+  }, [refreshDefinedNames, useInFormulaOpen]);
+
+  useEffect(() => {
+    const unsubscribe = wb.on('namedRangeChanged', () => {
+      if (useInFormulaOpen) {
+        void refreshDefinedNames();
+      }
+    });
+    return unsubscribe;
+  }, [refreshDefinedNames, useInFormulaOpen, wb]);
+
   // Handle Insert Function click - uses unified action system
   const handleInsertFunction = useCallback(() => {
     dispatch('OPEN_INSERT_FUNCTION_DIALOG', deps);
@@ -746,10 +788,17 @@ export function FormulasRibbon() {
     dispatch('TOGGLE_SHOW_FORMULAS', deps);
   }, [deps]);
 
-  const handleFormulaReferences = useCallback(() => {
-    setSidePanelContent('formula-references');
-    setSidePanelVisible(true);
-  }, [setSidePanelContent, setSidePanelVisible]);
+  const handleErrorChecking = useCallback(() => {
+    dispatch('OPEN_ERROR_CHECKING_DIALOG', deps);
+  }, [deps]);
+
+  const handleEvaluateFormula = useCallback(() => {
+    dispatch('OPEN_EVALUATE_FORMULA_DIALOG', deps);
+  }, [deps]);
+
+  const handleWatchWindow = useCallback(() => {
+    dispatch('OPEN_WATCH_WINDOW', deps);
+  }, [deps]);
 
   // Handle Calculation Mode change - uses unified action system
   const handleCalculationModeChange = useCallback(
@@ -763,19 +812,10 @@ export function FormulasRibbon() {
 
   const handleIterativeCalculationChange = useCallback(
     async (enabled: boolean) => {
-      await setSetting('calculationSettings', {
-        ...calculationSettings,
-        enableIterativeCalculation: enabled,
-        maxIterations: calculationSettings.maxIterations ?? 100,
-        maxChange: calculationSettings.maxChange ?? 0.001,
-        calcMode: calculationSettings.calcMode ?? 'auto',
-        fullPrecision: calculationSettings.fullPrecision ?? true,
-        r1c1Mode: calculationSettings.r1c1Mode ?? false,
-        fullCalcOnLoad: calculationSettings.fullCalcOnLoad ?? false,
-      });
+      await wb.setIterativeCalculation(enabled);
       await wb.calculate();
     },
-    [calculationSettings, setSetting, wb],
+    [wb],
   );
 
   // Handle Calculate Now (F9)
@@ -812,6 +852,13 @@ export function FormulasRibbon() {
   const handleCreateFromSelection = useCallback(() => {
     dispatch('CREATE_NAMES_FROM_SELECTION', deps);
   }, [deps]);
+
+  const handleUseDefinedName = useCallback(
+    (name: string) => {
+      dispatch('PASTE_NAME_IN_FORMULA', deps, { name });
+    },
+    [deps],
+  );
 
   // Handle Trace Precedents click (F3) -
   const handleTracePrecedents = useCallback(() => {
@@ -850,6 +897,9 @@ export function FormulasRibbon() {
         {fn}
       </RibbonDropdownItem>
     ));
+
+  const recentlyUsedFunctions =
+    mruFunctions.length > 0 ? mruFunctions : ['SUM', 'AVERAGE', 'IF', 'COUNT'];
 
   // ===========================================================================
   // KeyTip Registration (display-only — keytip overlay reads `key`,
@@ -943,6 +993,7 @@ export function FormulasRibbon() {
                 isOpen={autoSumOpen}
                 title="AutoSum - Insert SUM formula (Alt+=)"
                 aria-label="AutoSum"
+                visibilityKey="autoSum"
               />
             }
             width="auto"
@@ -988,19 +1039,33 @@ export function FormulasRibbon() {
           {/* Excel shows: Recently Used, Financial, Logical, Text, Date & Time, Lookup & Reference, Math & Trig, More Functions */}
           {/* All as compact buttons with icon above label in a single row */}
 
-          {/* Recently Used - stub for now */}
-          <RibbonButton
-            layout="vertical"
-            height="full"
-            width="normal"
-            data-testid="ribbon-dropdown-recently-used"
-            icon={<RecentlyUsedIcon />}
-            label={'Recently\nUsed'}
-            hasDropdown
-            disabled
-            title="Recently Used Functions (coming soon)"
-            aria-label="Recently Used"
-          />
+          <RibbonDropdown
+            open={recentlyUsedOpen}
+            onOpenChange={setRecentlyUsedOpen}
+            menuTestId="ribbon-dropdown-menu-recently-used"
+            trigger={
+              <RibbonButton
+                layout="vertical"
+                height="full"
+                width="normal"
+                data-testid="ribbon-dropdown-recently-used"
+                icon={<RecentlyUsedIcon />}
+                label={'Recently\nUsed'}
+                hasDropdown
+                isOpen={recentlyUsedOpen}
+                title="Recently Used Functions"
+                aria-label="Recently Used"
+              />
+            }
+            width="auto"
+            menuLabel="Recently used functions"
+          >
+            {renderFunctionItems(recentlyUsedFunctions)}
+            <RibbonDropdownDivider />
+            <RibbonDropdownItem dataValue="insert-function" onClick={handleInsertFunction}>
+              Insert Function...
+            </RibbonDropdownItem>
+          </RibbonDropdown>
 
           <RibbonDropdown
             open={financialOpen}
@@ -1215,6 +1280,47 @@ export function FormulasRibbon() {
         </div>
       </ToolbarGroup>
 
+      <ToolbarGroup label="Python" dropdownIcon={<FunctionIcon />}>
+        <div className="flex items-center gap-[var(--ribbon-group-items-gap)]">
+          <RibbonButton
+            layout="vertical"
+            height="full"
+            width="normal"
+            icon={<FunctionIcon />}
+            label={'Insert\nPython'}
+            title="Insert Python"
+            aria-label="Insert Python"
+          />
+          <RibbonButton
+            layout="vertical"
+            height="full"
+            width="narrow"
+            icon={<CalculateIcon />}
+            label="Reset"
+            title="Reset Python"
+            aria-label="Reset"
+          />
+          <RibbonButton
+            layout="vertical"
+            height="full"
+            width="narrow"
+            icon={<TextFunctionIcon />}
+            label="Editor"
+            title="Python Editor"
+            aria-label="Editor"
+          />
+          <RibbonButton
+            layout="vertical"
+            height="full"
+            width="normal"
+            icon={<MoreFunctionsIcon />}
+            label="Initialization"
+            title="Python Initialization"
+            aria-label="Initialization"
+          />
+        </div>
+      </ToolbarGroup>
+
       {/* Defined Names Group - F2: Named Ranges */}
       <ToolbarGroup
         label="Defined Names"
@@ -1244,21 +1350,52 @@ export function FormulasRibbon() {
             onClick={handleDefineName}
             title="Define Name - Create a named range from selection"
             aria-label="Define Name"
+            visibilityKey="defineName"
           />
 
-          {/* Use in Formula - stub for now */}
-          <RibbonButton
-            layout="vertical"
-            height="full"
-            width="narrow"
-            data-testid="ribbon-dropdown-use-in-formula"
-            icon={<UseInFormulaIcon />}
-            label={'Use in\nFormula'}
-            hasDropdown
-            disabled
-            title="Use in Formula (coming soon)"
-            aria-label="Use in Formula"
-          />
+          <RibbonDropdown
+            open={useInFormulaOpen}
+            onOpenChange={setUseInFormulaOpen}
+            position="bottom-left"
+            width="md"
+            menuLabel="Use in Formula"
+            menuTestId="ribbon-dropdown-menu-use-in-formula"
+            trigger={
+              <RibbonButton
+                layout="vertical"
+                height="full"
+                width="narrow"
+                data-testid="ribbon-dropdown-use-in-formula"
+                icon={<UseInFormulaIcon />}
+                label={'Use in\nFormula'}
+                hasDropdown
+                title="Use in Formula - Insert a defined name into the formula"
+                aria-label="Use in Formula"
+              />
+            }
+          >
+            {definedNames.length === 0 ? (
+              <RibbonDropdownItem disabled>No names defined</RibbonDropdownItem>
+            ) : (
+              definedNames.map((definedName) => (
+                <RibbonDropdownItem
+                  key={`${definedName.scope ?? 'workbook'}:${definedName.name}`}
+                  onClick={() => handleUseDefinedName(definedName.name)}
+                  testId="ribbon-use-in-formula-name"
+                  dataValue={definedName.name}
+                >
+                  <div className="flex min-w-0 flex-col">
+                    <span className="truncate">{definedName.name}</span>
+                    {definedName.scope && (
+                      <span className="truncate text-dropdown-header text-ss-text-tertiary">
+                        {definedName.scope}
+                      </span>
+                    )}
+                  </div>
+                </RibbonDropdownItem>
+              ))
+            )}
+          </RibbonDropdown>
 
           {/* F2: Create from Selection */}
           <RibbonButton
@@ -1270,6 +1407,7 @@ export function FormulasRibbon() {
             onClick={handleCreateFromSelection}
             title="Create from Selection - Create names from row/column labels (Ctrl+Shift+F3)"
             aria-label="Create from Selection"
+            visibilityKey="createFromSelection"
           />
         </div>
       </ToolbarGroup>
@@ -1290,6 +1428,7 @@ export function FormulasRibbon() {
             onClick={handleTracePrecedents}
             title="Trace Precedents - Show cells that affect selected cell"
             aria-label="Trace Precedents"
+            visibilityKey="tracePrecedents"
           />
 
           <RibbonButton
@@ -1301,6 +1440,7 @@ export function FormulasRibbon() {
             onClick={handleTraceDependents}
             title="Trace Dependents - Show cells affected by selected cell"
             aria-label="Trace Dependents"
+            visibilityKey="traceDependents"
           />
 
           {/* F3: Remove Arrows Dropdown (B2.5) */}
@@ -1322,6 +1462,7 @@ export function FormulasRibbon() {
                 disabled={!hasArrows}
                 title="Remove Arrows - Remove trace arrows"
                 aria-label="Remove Arrows"
+                visibilityKey="removeArrows"
               />
             }
             width="auto"
@@ -1349,6 +1490,7 @@ export function FormulasRibbon() {
             title={`Show Formulas (Ctrl+\`) - ${showFormulas ? 'ON' : 'OFF'}`}
             aria-label="Show Formulas"
             aria-pressed={showFormulas}
+            visibilityKey="showFormulas"
           />
 
           {/* F3: Error Checking */}
@@ -1357,10 +1499,35 @@ export function FormulasRibbon() {
             height="full"
             width="normal"
             icon={<ErrorCheckingIcon />}
-            label={'Formula\nReferences'}
-            onClick={handleFormulaReferences}
-            title="Formula References"
-            aria-label="Formula References"
+            label={'Error\nChecking'}
+            onClick={handleErrorChecking}
+            title="Error Checking - Check formulas for errors"
+            aria-label="Error Checking"
+            visibilityKey="errorChecking"
+          />
+
+          <RibbonButton
+            layout="vertical"
+            height="full"
+            width="normal"
+            icon={<EvaluateFormulaIcon />}
+            label={'Evaluate\nFormula'}
+            onClick={handleEvaluateFormula}
+            title="Evaluate Formula - Step through selected formula"
+            aria-label="Evaluate Formula"
+            visibilityKey="evaluateFormula"
+          />
+
+          <RibbonButton
+            layout="vertical"
+            height="full"
+            width="normal"
+            icon={<WatchWindowIcon />}
+            label={'Watch\nWindow'}
+            onClick={handleWatchWindow}
+            title="Watch Window - Monitor selected cells"
+            aria-label="Watch Window"
+            visibilityKey="watchWindow"
           />
         </div>
       </ToolbarGroup>
@@ -1373,34 +1540,45 @@ export function FormulasRibbon() {
         dropdownIcon={<CalculateIcon />}
       >
         <div className="flex items-center gap-[var(--ribbon-group-items-gap)]">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                className="h-7 min-w-[90px] px-2 text-ribbon text-ss-text-secondary bg-transparent border border-transparent rounded hover:bg-ss-surface-hover focus:border-ss-border-focus cursor-pointer outline-none flex items-center justify-between gap-1"
-                title="Calculation Options"
-                aria-label="Calculation Mode"
-              >
-                <span>{calculationMode === 'auto' ? 'Automatic' : 'Manual'}</span>
-                <ChevronDownSvg className="w-3 h-3" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuRadioGroup
-                value={calculationMode}
-                onValueChange={handleCalculationModeChange}
-              >
-                <DropdownMenuRadioItem value="auto">Automatic</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="manual">Manual</DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-              <DropdownMenuCheckboxItem
-                id="formulas-iterative-calculation"
-                checked={iterativeCalculationEnabled}
-                onCheckedChange={handleIterativeCalculationChange}
-              >
-                Enable Iterative Calculation
-              </DropdownMenuCheckboxItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <RibbonVisibilityItem item="calculationOptions">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  className="h-7 min-w-[90px] px-2 text-ribbon text-ss-text-secondary bg-transparent border border-transparent rounded hover:bg-ss-surface-hover focus:border-ss-border-focus cursor-pointer outline-none flex items-center justify-between gap-1"
+                  title="Calculation Options"
+                  aria-label="Calculation Mode"
+                >
+                  <span>{calculationMode === 'auto' ? 'Automatic' : 'Manual'}</span>
+                  <ChevronDownSvg className="w-3 h-3" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuRadioGroup
+                  value={calculationMode}
+                  onValueChange={handleCalculationModeChange}
+                >
+                  <DropdownMenuRadioItem value="auto">Automatic</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="partial" disabled>
+                    Partial
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="manual">Manual</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+                <DropdownMenuCheckboxItem checked={false} disabled>
+                  Format Stale Values
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuCheckboxItem checked={false} disabled>
+                  Compatibility Version
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuCheckboxItem
+                  id="formulas-iterative-calculation"
+                  checked={iterativeCalculationEnabled}
+                  onCheckedChange={handleIterativeCalculationChange}
+                >
+                  Enable Iterative Calculation
+                </DropdownMenuCheckboxItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </RibbonVisibilityItem>
 
           <RibbonButton
             layout="vertical"
@@ -1411,6 +1589,7 @@ export function FormulasRibbon() {
             onClick={handleCalculateNow}
             title="Calculate Now (F9) - Recalculate all formulas in workbook"
             aria-label="Calculate Now"
+            visibilityKey="calculateNow"
           />
 
           {/* F4: Calculate Sheet */}
@@ -1423,6 +1602,7 @@ export function FormulasRibbon() {
             onClick={handleCalculateSheet}
             title="Calculate Sheet (Shift+F9) - Recalculate active sheet only"
             aria-label="Calculate Sheet"
+            visibilityKey="calculateSheet"
           />
         </div>
       </ToolbarGroup>

@@ -10,13 +10,17 @@ use compute_document::hex::{SmallHex, id_to_hex};
 
 use cell_types::CellId;
 
-use compute_document::cell_serde::build_cell_prelim;
+use compute_document::cell_serde::{
+    build_cell_prelim, write_array_ref_to_yrs, write_rich_string_to_yrs,
+};
 
 use super::IdAllocator;
 use super::helpers::get_or_create_cell_id_for_pos;
 use crate::import::parse_output_to_snapshot::hyperlink_lowering::{
     HyperlinkAnchor, classify_hyperlink_anchor,
 };
+use crate::storage::sheet::schemas;
+use domain_types::domain::hyperlink::HyperlinkTargetKind;
 use formula_types::CellRef;
 
 // ===========================================================================
@@ -57,7 +61,16 @@ pub(super) fn hydrate_cells(
             cell.formula.as_deref(),
             None, // No identity formulas in ParseOutput
         );
-        cells_map.insert(txn, &*cell_hex, cell_prelim);
+        let cell_map: MapRef = cells_map.insert(txn, &*cell_hex, cell_prelim);
+        if let Some(array_ref) = cell.array_ref.as_deref() {
+            write_array_ref_to_yrs(&cell_map, txn, array_ref);
+        }
+        if let Some(rich_string) = cell.rich_string.as_ref() {
+            write_rich_string_to_yrs(&cell_map, txn, rich_string);
+        }
+        if let Some(cell_formula) = cell.cell_formula.as_ref() {
+            write_formula_metadata_to_yrs(&cell_map, txn, cell_formula);
+        }
 
         // Track position → cell_hex in memory for downstream hydration lookups
         let pos_key = format!("{}:{}", cell.row, cell.col);
@@ -90,14 +103,17 @@ pub(super) fn hydrate_cells_with_ids(
         if cell.projection_role == ImportedCellProjectionRole::DynamicArraySpillTarget {
             continue;
         }
-        let is_empty = cell.formula.is_none() && cell.value.is_null();
+        let is_empty = cell.formula.is_none() && cell.value.is_null() && cell.rich_string.is_none();
         let style_is_range_backed = range_style_positions.contains(&(cell.row, cell.col));
         let has_cell_properties = (cell.style_id.is_some() && !style_is_range_backed)
-            || cell.cm
+            || cell.cell_metadata_index.is_some()
             || cell.vm.is_some()
             || cell.formula_result_type.is_some()
+            || cell.has_empty_cached_value
+            || !cell.formula_cache_provenance.is_absent_or_unknown()
             || cell.original_sst_index.is_some()
-            || cell.original_value.is_some();
+            || cell.original_value.is_some()
+            || cell.rich_string.is_some();
 
         // Skip truly empty cells (no value, no formula, no persisted properties).
         // Cells with properties must stay in pos_map so hydrate_cell_styles can
@@ -122,7 +138,7 @@ pub(super) fn hydrate_cells_with_ids(
 
         // Empty styled cells don't need a Yrs cell entry — only the
         // pos_map slot (for style hydration). Skip the Yrs write.
-        if is_empty {
+        if is_empty && cell.original_value.is_none() {
             continue;
         }
 
@@ -131,9 +147,32 @@ pub(super) fn hydrate_cells_with_ids(
         }
 
         let cell_prelim = build_cell_prelim(&cell.value, cell.formula.as_deref(), None);
-        cells_map.insert(txn, &*cell_hex, cell_prelim);
+        let cell_map: MapRef = cells_map.insert(txn, &*cell_hex, cell_prelim);
+        if let Some(array_ref) = cell.array_ref.as_deref() {
+            write_array_ref_to_yrs(&cell_map, txn, array_ref);
+        }
+        if let Some(rich_string) = cell.rich_string.as_ref() {
+            write_rich_string_to_yrs(&cell_map, txn, rich_string);
+        }
+        if let Some(cell_formula) = cell.cell_formula.as_ref() {
+            write_formula_metadata_to_yrs(&cell_map, txn, cell_formula);
+        }
     }
     pos_map
+}
+
+fn write_formula_metadata_to_yrs(
+    cell_map: &MapRef,
+    txn: &mut yrs::TransactionMut<'_>,
+    formula: &ooxml_types::worksheet::CellFormula,
+) {
+    let json = serde_json::to_string(formula)
+        .expect("ooxml cell formula metadata should be JSON-serializable");
+    cell_map.insert(
+        txn,
+        compute_document::schema::KEY_FORMULA_METADATA,
+        Any::String(Arc::from(json)),
+    );
 }
 
 // ===========================================================================
@@ -451,6 +490,12 @@ pub(super) fn hydrate_hyperlinks(
                 if let Some(uid) = &link.uid {
                     entry["uid"] = serde_json::json!(uid);
                 }
+                if let Some(target_kind) = hyperlink_target_kind(link) {
+                    entry["targetKind"] = serde_json::json!(hyperlink_target_kind_str(target_kind));
+                }
+                if let Some(target_mode) = &link.target_mode {
+                    entry["targetMode"] = serde_json::json!(target_mode);
+                }
                 extra_range_hyperlinks.push(entry);
                 continue;
             }
@@ -475,6 +520,18 @@ pub(super) fn hydrate_hyperlinks(
             {
                 cell_map.insert(txn, "hu", Any::String(Arc::from(uid.as_str())));
             }
+            if let Some(target_kind) = hyperlink_target_kind(link) {
+                cell_map.insert(
+                    txn,
+                    "hk",
+                    Any::String(Arc::from(hyperlink_target_kind_str(target_kind))),
+                );
+            }
+            if let Some(target_mode) = &link.target_mode
+                && !target_mode.is_empty()
+            {
+                cell_map.insert(txn, "hm", Any::String(Arc::from(target_mode.as_str())));
+            }
             // Store original cell_ref for range hyperlinks (e.g., "A1:B2")
             // so the export can reconstruct the original range ref. The
             // typed `HyperlinkAnchor::Range` branch is the discriminator —
@@ -491,6 +548,27 @@ pub(super) fn hydrate_hyperlinks(
 
     // Store extra range hyperlinks in the sheet meta for roundtrip fidelity
     yrs_schema::helpers::write_json_vec(meta_map, txn, "rangeHyperlinks", &extra_range_hyperlinks);
+}
+
+fn hyperlink_target_kind(
+    link: &domain_types::domain::hyperlink::Hyperlink,
+) -> Option<HyperlinkTargetKind> {
+    link.target_kind.or_else(|| {
+        if link.target.is_some() {
+            Some(HyperlinkTargetKind::Relationship)
+        } else if link.location.is_some() {
+            Some(HyperlinkTargetKind::InlineLocation)
+        } else {
+            None
+        }
+    })
+}
+
+fn hyperlink_target_kind_str(kind: HyperlinkTargetKind) -> &'static str {
+    match kind {
+        HyperlinkTargetKind::InlineLocation => "inlineLocation",
+        HyperlinkTargetKind::Relationship => "relationship",
+    }
 }
 
 /// Extract the top-left `(row, col)` position from a typed [`HyperlinkAnchor`].
@@ -598,10 +676,12 @@ pub(super) fn hydrate_conditional_formats(
 
 /// Hydrate data validations using structured Y.Map entries via `yrs_schema::validation`.
 ///
-/// Validations live solely in `properties/dataValidations` as a `Y.Array<Y.Map>`.
-/// The runtime schemas API is a view over the same store.
+/// Validations are preserved in `properties/dataValidations` for lossless
+/// export and written through to the live range-backed validation store.
 pub(super) fn hydrate_data_validations(
     txn: &mut yrs::TransactionMut,
+    sheets_root: &MapRef,
+    sheet_id: &cell_types::SheetId,
     meta_map: &MapRef,
     data_validations: &[domain_types::domain::validation::ValidationSpec],
     disable_prompts: bool,
@@ -609,17 +689,26 @@ pub(super) fn hydrate_data_validations(
     y_window: Option<u32>,
     declared_count: Option<u32>,
 ) {
-    if data_validations.is_empty() {
+    if data_validations.is_empty()
+        && !disable_prompts
+        && x_window.is_none()
+        && y_window.is_none()
+        && declared_count.is_none()
+    {
         return;
     }
 
-    let dv_arr: yrs::ArrayRef =
-        meta_map.insert(txn, "dataValidations", yrs::ArrayPrelim::default());
+    if !data_validations.is_empty() {
+        schemas::write_imported_validation_specs(txn, sheets_root, sheet_id, data_validations, "");
 
-    for dv in data_validations.iter() {
-        let entries = yrs_schema::validation::to_yrs_prelim(dv);
-        let dv_entry_prelim: MapPrelim = entries.into_iter().collect();
-        dv_arr.push_back(txn, dv_entry_prelim);
+        let dv_arr: yrs::ArrayRef =
+            meta_map.insert(txn, "dataValidations", yrs::ArrayPrelim::default());
+
+        for dv in data_validations.iter() {
+            let entries = yrs_schema::validation::to_yrs_prelim(dv);
+            let dv_entry_prelim: MapPrelim = entries.into_iter().collect();
+            dv_arr.push_back(txn, dv_entry_prelim);
+        }
     }
 
     // Store container-level disablePrompts flag for round-trip fidelity
@@ -636,6 +725,59 @@ pub(super) fn hydrate_data_validations(
     // File-format container metadata; runtime validation edits clear this key.
     if let Some(count) = declared_count {
         meta_map.insert(txn, "dvDeclaredCount", count as i64);
+    }
+}
+
+pub(super) fn hydrate_x14_data_validations(
+    txn: &mut yrs::TransactionMut,
+    sheets_root: &MapRef,
+    sheet_id: &cell_types::SheetId,
+    meta_map: &MapRef,
+    data_validations: &[domain_types::domain::validation::ValidationSpec],
+    disable_prompts: bool,
+    x_window: Option<u32>,
+    y_window: Option<u32>,
+    declared_count: Option<u32>,
+) {
+    if data_validations.is_empty()
+        && !disable_prompts
+        && x_window.is_none()
+        && y_window.is_none()
+        && declared_count.is_none()
+    {
+        return;
+    }
+
+    if !data_validations.is_empty() {
+        schemas::write_imported_validation_specs(
+            txn,
+            sheets_root,
+            sheet_id,
+            data_validations,
+            "x14-",
+        );
+
+        let dv_arr: yrs::ArrayRef =
+            meta_map.insert(txn, "x14DataValidations", yrs::ArrayPrelim::default());
+
+        for dv in data_validations.iter() {
+            let entries = yrs_schema::validation::to_yrs_prelim(dv);
+            let dv_entry_prelim: MapPrelim = entries.into_iter().collect();
+            dv_arr.push_back(txn, dv_entry_prelim);
+        }
+    }
+
+    if disable_prompts {
+        meta_map.insert(txn, "x14DvDisablePrompts", true);
+    }
+    if let Some(x) = x_window {
+        meta_map.insert(txn, "x14DvXWindow", x as i64);
+    }
+    if let Some(y) = y_window {
+        meta_map.insert(txn, "x14DvYWindow", y as i64);
+    }
+    if let Some(count) = declared_count {
+        meta_map.insert(txn, "x14DvDeclaredCount", count as i64);
     }
 }
 

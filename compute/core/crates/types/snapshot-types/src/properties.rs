@@ -3,7 +3,7 @@
 //! `CellFormat` lives in the `domain-types` crate —
 //! import from there directly.
 
-use domain_types::CellFormat;
+use domain_types::{CellFormat, FormulaCacheProvenance};
 use serde::{Deserialize, Serialize};
 
 /// Discriminant for region-membership kinds on the wire surface.
@@ -57,7 +57,7 @@ pub struct RegionMeta {
 /// Mirrors [`domain_types::CellMetadata`]. Typed OOXML preservation: promoted the former
 /// `extra: HashMap<String, serde_json::Value>` bag to typed named
 /// fields (`style_id`, `cm`, `vm`, `formula_result_type`,
-/// `original_sst_index`, `original_value`).
+/// `has_empty_cached_value`, `original_sst_index`, `original_value`).
 ///
 /// **D3 (projection-family unification):** `region` is the unified
 /// region-membership shape; `is_array_formula`, `is_cse_anchor`, and
@@ -75,12 +75,28 @@ pub struct CellMetadata {
     pub connection_id: Option<String>,
     #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
     pub style_id: Option<u32>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub cm: bool,
+    #[serde(rename = "cm", skip_serializing_if = "Option::is_none")]
+    pub cell_metadata_index: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vm: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub phonetic: bool,
+    #[serde(rename = "dateLexicalValue", skip_serializing_if = "Option::is_none")]
+    pub date_lexical_value: Option<String>,
     #[serde(rename = "formulaResultType", skip_serializing_if = "Option::is_none")]
     pub formula_result_type: Option<u8>,
+    #[serde(
+        rename = "hasEmptyCachedValue",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub has_empty_cached_value: bool,
+    #[serde(
+        rename = "formulaCacheProvenance",
+        default,
+        skip_serializing_if = "FormulaCacheProvenance::is_absent_or_unknown"
+    )]
+    pub formula_cache_provenance: FormulaCacheProvenance,
     #[serde(rename = "sstIndex", skip_serializing_if = "Option::is_none")]
     pub original_sst_index: Option<u32>,
     #[serde(rename = "originalValue", skip_serializing_if = "Option::is_none")]
@@ -115,12 +131,28 @@ pub struct CellProperties {
     pub connection_id: Option<String>,
     #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
     pub style_id: Option<u32>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub cm: bool,
+    #[serde(rename = "cm", skip_serializing_if = "Option::is_none")]
+    pub cell_metadata_index: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vm: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub phonetic: bool,
+    #[serde(rename = "dateLexicalValue", skip_serializing_if = "Option::is_none")]
+    pub date_lexical_value: Option<String>,
     #[serde(rename = "formulaResultType", skip_serializing_if = "Option::is_none")]
     pub formula_result_type: Option<u8>,
+    #[serde(
+        rename = "hasEmptyCachedValue",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub has_empty_cached_value: bool,
+    #[serde(
+        rename = "formulaCacheProvenance",
+        default,
+        skip_serializing_if = "FormulaCacheProvenance::is_absent_or_unknown"
+    )]
+    pub formula_cache_provenance: FormulaCacheProvenance,
     #[serde(rename = "sstIndex", skip_serializing_if = "Option::is_none")]
     pub original_sst_index: Option<u32>,
     #[serde(rename = "originalValue", skip_serializing_if = "Option::is_none")]
@@ -138,9 +170,13 @@ impl CellProperties {
             && self.validation.is_none()
             && self.connection_id.is_none()
             && self.style_id.is_none()
-            && !self.cm
+            && self.cell_metadata_index.is_none()
             && self.vm.is_none()
+            && !self.phonetic
+            && self.date_lexical_value.is_none()
             && self.formula_result_type.is_none()
+            && !self.has_empty_cached_value
+            && self.formula_cache_provenance.is_absent_or_unknown()
             && self.original_sst_index.is_none()
             && self.original_value.is_none()
             && !self.is_array_formula
@@ -154,9 +190,11 @@ impl CellMetadata {
             && self.validation.is_none()
             && self.connection_id.is_none()
             && self.style_id.is_none()
-            && !self.cm
+            && self.cell_metadata_index.is_none()
             && self.vm.is_none()
             && self.formula_result_type.is_none()
+            && !self.has_empty_cached_value
+            && self.formula_cache_provenance.is_absent_or_unknown()
             && self.original_sst_index.is_none()
             && self.original_value.is_none()
             && !self.is_array_formula
@@ -174,9 +212,13 @@ impl From<domain_types::CellProperties> for CellProperties {
             validation: d.validation,
             connection_id: d.connection_id,
             style_id: d.style_id,
-            cm: d.cm,
+            cell_metadata_index: d.cell_metadata_index,
             vm: d.vm,
+            phonetic: d.phonetic,
+            date_lexical_value: d.date_lexical_value,
             formula_result_type: d.formula_result_type,
+            has_empty_cached_value: d.has_empty_cached_value,
+            formula_cache_provenance: d.formula_cache_provenance,
             original_sst_index: d.original_sst_index,
             original_value: d.original_value,
             is_array_formula: d.is_array_formula,
@@ -193,9 +235,13 @@ impl From<CellProperties> for domain_types::CellProperties {
             validation: s.validation,
             connection_id: s.connection_id,
             style_id: s.style_id,
-            cm: s.cm,
+            cell_metadata_index: s.cell_metadata_index,
             vm: s.vm,
+            phonetic: s.phonetic,
+            date_lexical_value: s.date_lexical_value,
             formula_result_type: s.formula_result_type,
+            has_empty_cached_value: s.has_empty_cached_value,
+            formula_cache_provenance: s.formula_cache_provenance,
             original_sst_index: s.original_sst_index,
             original_value: s.original_value,
             is_array_formula: s.is_array_formula,

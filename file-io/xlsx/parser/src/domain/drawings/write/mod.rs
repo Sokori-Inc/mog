@@ -31,7 +31,7 @@
 
 pub(crate) mod convert;
 mod helpers;
-mod types;
+pub(crate) mod types;
 mod writer;
 
 #[cfg(test)]
@@ -64,11 +64,11 @@ pub use types::{
     ExtensionList, Extent, FillMode, GeomGuide, GradientFill, GradientStop, GroupLocking,
     GroupShapeProps, GroupTransform2D, Hyperlink, ImageProps, LineCap, LineEndProperties,
     LineEndSize, LineEndType, LineJoin, NS_A, NS_A14, NS_C, NS_CX, NS_CX1, NS_DGM, NS_MC, NS_R,
-    NS_SLE, NS_XDR, OneCellAnchor, OpaqueGraphicFrame, Outline, Paragraph, ParagraphProperties,
-    PatternFill, PenAlignment, Position, PresetGeometry, PresetMaterialType, RunProperties,
-    SLICER_GRAPHIC_DATA_URI, Scene3D, SchemeColor, Shape3D, ShapePreset, ShapeProps, ShapeStyle,
-    SmartArtWriteData, SolidFill, SourceRect, StyleRef, TextAlign, TextAnchor, TextAutofit,
-    TextAutonumberType, TextBody, TextBodyProperties, TextBox, TextCapsType, TextFont,
+    NS_SLE, NS_XDR, OneCellAnchor, OpaqueDrawingObject, OpaqueGraphicFrame, Outline, Paragraph,
+    ParagraphProperties, PatternFill, PenAlignment, Position, PresetGeometry, PresetMaterialType,
+    RunProperties, SLICER_GRAPHIC_DATA_URI, Scene3D, SchemeColor, Shape3D, ShapePreset, ShapeProps,
+    ShapeStyle, SmartArtWriteData, SolidFill, SourceRect, StyleRef, TextAlign, TextAnchor,
+    TextAutofit, TextAutonumberType, TextBody, TextBodyProperties, TextBox, TextCapsType, TextFont,
     TextFontAlignType, TextHorzOverflow, TextListStyle, TextRun, TextRunContent, TextSpacing,
     TextStrikeType, TextTabAlignType, TextTabStop, TextUnderlineType, TextVertOverflow,
     TextVerticalType, TextWrap, Transform2D, TwoCellAnchor, UnderlineFill, UnderlineLine,

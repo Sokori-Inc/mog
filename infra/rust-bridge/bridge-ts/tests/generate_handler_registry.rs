@@ -123,14 +123,37 @@ fn bridge_source_files() -> Vec<String> {
     vec![
         // Compute engine (stateful — YrsComputeEngine)
         format!("{}/compute/core/src/storage/engine/mod.rs", base),
+        format!("{}/compute/core/src/storage/engine/bridge_imports.rs", base),
+        format!("{}/compute/core/src/storage/engine/workbook_theme.rs", base),
+        format!("{}/compute/core/src/storage/engine/cell_bridge.rs", base),
+        format!("{}/compute/core/src/storage/engine/undo_bridge.rs", base),
+        format!("{}/compute/core/src/storage/engine/sync_bridge.rs", base),
         format!("{}/compute/core/src/storage/engine/delegations.rs", base),
         format!("{}/compute/core/src/storage/engine/viewport/mod.rs", base),
         format!("{}/compute/core/src/storage/engine/queries.rs", base),
-        format!("{}/compute/core/src/storage/engine/structural.rs", base),
-        format!("{}/compute/core/src/storage/engine/formatting.rs", base),
+        format!("{}/compute/core/src/storage/engine/structural/mod.rs", base),
+        format!("{}/compute/core/src/storage/engine/formatting/mod.rs", base),
         format!("{}/compute/core/src/storage/engine/tables.rs", base),
-        format!("{}/compute/core/src/storage/engine/features.rs", base),
-        format!("{}/compute/core/src/storage/engine/objects.rs", base),
+        format!("{}/compute/core/src/storage/engine/features/mod.rs", base),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/comments.rs",
+            base
+        ),
+        format!("{}/compute/core/src/storage/engine/objects/charts.rs", base),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/floating.rs",
+            base
+        ),
+        format!("{}/compute/core/src/storage/engine/objects/groups.rs", base),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/z_order.rs",
+            base
+        ),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/hyperlinks.rs",
+            base
+        ),
+        format!("{}/compute/core/src/storage/engine/objects/pivots.rs", base),
         format!(
             "{}/compute/core/src/storage/engine/viewport/registry.rs",
             base
@@ -152,6 +175,12 @@ fn handler_output_path() -> String {
         "{}/../../../runtime/src-tauri/src/handlers.gen.rs",
         env!("CARGO_MANIFEST_DIR")
     )
+}
+
+fn has_tauri_handler_output_path() -> bool {
+    std::path::Path::new(&handler_output_path())
+        .parent()
+        .is_some_and(|parent| parent.exists())
 }
 
 fn metadata_output_path() -> String {
@@ -260,8 +289,15 @@ fn generate() {
 
     let handler_content = emit_handler_registry(&handlers);
     let handler_path = handler_output_path();
-    std::fs::write(&handler_path, &handler_content).unwrap();
-    eprintln!("Written handler registry to: {}", handler_path);
+    if has_tauri_handler_output_path() {
+        std::fs::write(&handler_path, &handler_content).unwrap();
+        eprintln!("Written handler registry to: {}", handler_path);
+    } else {
+        eprintln!(
+            "Skipping handler registry write; Tauri output directory is not present at {}",
+            handler_path
+        );
+    }
 
     // ── Command metadata (TypeScript) ──
     let metadata_content = emit_command_metadata(&api, &recalc_exclusions(), &security_overrides());
@@ -284,16 +320,23 @@ fn verify_up_to_date() {
     let expected_handlers = emit_handler_registry(&handlers);
 
     let handler_path = handler_output_path();
-    let actual_handlers = std::fs::read_to_string(&handler_path).unwrap_or_else(|e| {
-        panic!(
-            "handlers.gen.rs not found at {}. Run:\n  pnpm generate:bridge\nError: {}",
-            handler_path, e
-        )
-    });
-    assert_eq!(
-        actual_handlers, expected_handlers,
-        "handlers.gen.rs is out of date! Regenerate with:\n  pnpm generate:bridge"
-    );
+    if has_tauri_handler_output_path() {
+        let actual_handlers = std::fs::read_to_string(&handler_path).unwrap_or_else(|e| {
+            panic!(
+                "handlers.gen.rs not found at {}. Run:\n  pnpm generate:bridge\nError: {}",
+                handler_path, e
+            )
+        });
+        assert_eq!(
+            actual_handlers, expected_handlers,
+            "handlers.gen.rs is out of date! Regenerate with:\n  pnpm generate:bridge"
+        );
+    } else {
+        eprintln!(
+            "Skipping handler registry verification; Tauri output directory is not present at {}",
+            handler_path
+        );
+    }
 
     // ── Command metadata ──
     let expected_metadata =

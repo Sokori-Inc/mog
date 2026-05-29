@@ -859,6 +859,56 @@ export interface CalculationSettings {
    * Default: false
    */
   fullCalcOnLoad: boolean;
+
+  /**
+   * Whether the workbook's last calculation completed.
+   * Preserved for XLSX calculation metadata fidelity.
+   * Default: true
+   */
+  calcCompleted: boolean;
+
+  /**
+   * Whether Excel should recalculate when saving.
+   * Default: true
+   */
+  calcOnSave: boolean;
+
+  /**
+   * Whether concurrent calculation is enabled.
+   * Default: true
+   */
+  concurrentCalc: boolean;
+
+  /**
+   * Explicit concurrent calculation thread count, when present.
+   * Default: null
+   */
+  concurrentManualCount: number | null;
+
+  /**
+   * Whether to force a full recalculation.
+   * Default: false
+   */
+  forceFullCalc: boolean;
+
+  /**
+   * Excel calculation engine version (`calcId` in OOXML).
+   */
+  calcId?: number;
+
+  /**
+   * Whether `iterateCount` was explicitly present in the source workbook.
+   * Preserved for XLSX round-trip fidelity.
+   * Default: false
+   */
+  hasExplicitIterateCount: boolean;
+
+  /**
+   * Whether `iterateDelta` was explicitly present in the source workbook.
+   * Preserved for XLSX round-trip fidelity.
+   * Default: false
+   */
+  hasExplicitIterateDelta: boolean;
 }
 
 // DEFAULT_CALCULATION_SETTINGS moved to @mog-sdk/kernel/defaults/core
@@ -1179,6 +1229,10 @@ export interface HeaderFooter {
 export interface PrintSettings {
   /** OOXML paper size code (1=Letter, 9=A4, etc.), null = not set */
   paperSize: number | null;
+  /** Custom paper width such as "210mm" or "8.5in", null = not set */
+  paperWidth?: string | null;
+  /** Custom paper height such as "297mm" or "11in", null = not set */
+  paperHeight?: string | null;
   /** Page orientation, null = not set (defaults to portrait) */
   orientation: string | null;
   /** Scale percentage (10-400), null = not set */
@@ -1189,6 +1243,8 @@ export interface PrintSettings {
   fitToHeight: number | null;
   /** Print cell gridlines */
   gridlines: boolean;
+  /** Whether gridline printing was explicitly set; OOXML defaults to true */
+  gridLinesSet?: boolean;
   /** Print row/column headings */
   headings: boolean;
   /** Center content horizontally on page */
@@ -1219,12 +1275,23 @@ export interface PrintSettings {
   hasPrintOptions: boolean;
   /** Whether the sheet had pageSetup element in OOXML */
   hasPageSetup: boolean;
+  /** Number of copies, null = not set */
+  copies?: number | null;
+  /** Sheet-level page setup properties from sheetPr/pageSetUpPr */
+  pageSetupProperties?: PageSetupProperties | null;
   /** Whether to use firstPageNumber (vs auto) */
   useFirstPageNumber: boolean;
   /** How to print cell comments: "none" | "atEnd" | "asDisplayed", null = not set (defaults to none) */
   printComments: string | null;
   /** How to print cell errors: "displayed" | "blank" | "dash" | "NA", null = not set (defaults to displayed) */
   printErrors: string | null;
+}
+
+export interface PageSetupProperties {
+  /** Fit sheet content to page dimensions */
+  fitToPage: boolean;
+  /** Automatically insert page breaks */
+  autoPageBreaks: boolean;
 }
 
 /** @deprecated Use PrintSettings instead */

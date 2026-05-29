@@ -15,7 +15,7 @@
 
 use compute_formats::FormatType;
 use compute_parser::FormulaSource;
-use value_types::CellValue;
+use value_types::{CellError, CellValue};
 
 use crate::storage::cells::values::{ParsedValue, parse_input_value};
 
@@ -73,6 +73,9 @@ impl CellWrite {
         if s.starts_with('=') {
             return Self::Formula(FormulaSource::parse(s));
         }
+        if let Some(error) = CellError::parse_error_str(s.trim()) {
+            return Self::Value(CellValue::Error(error, None));
+        }
         // No apostrophe handling here: `from_user_string` does not strip
         // leading `'` today and continues not to. The force-text editor path
         // strips at the service layer (`set_cell_value_as_text`) and routes
@@ -81,6 +84,7 @@ impl CellWrite {
             ParsedValue::Empty => CellValue::Null,
             ParsedValue::Number(n) => CellValue::number(n),
             ParsedValue::Boolean(b) => CellValue::Boolean(b),
+            ParsedValue::Error(e) => CellValue::Error(e, None),
             // Preserve the original (non-trimmed) input for text — matches
             // the existing `parse_plain_value` contract for trailing whitespace
             // round-trip.

@@ -9,8 +9,7 @@
  *
  */
 
-import type { CellId } from '@mog-sdk/contracts/cell-identity';
-import type { Comment } from '@mog-sdk/contracts/comments';
+import type { Comment } from '@mog-sdk/contracts/api';
 import type { ConditionalFormat } from '@mog-sdk/contracts/conditional-format';
 import type { CellFormat, SheetId } from '@mog-sdk/contracts/core';
 import type { RangeSchema } from '@mog-sdk/contracts/schema';
@@ -70,15 +69,10 @@ export interface ClipboardStoreReader {
    */
   getRangeSchemas?(sheetId: SheetId): RangeSchema[];
   /**
-   * Get CellId at a given position.
-   * Comments in Clipboard - needed to look up comments by cell position.
-   */
-  getCellIdAt?(sheetId: SheetId, row: number, col: number): CellId | null;
-  /**
-   * Get comments for a cell by CellId.
+   * Get comments for a cell by row/column position.
    * Comments in Clipboard - captures comments when copying cells.
    */
-  getCommentsForCell?(sheetId: SheetId, cellId: CellId): Comment[];
+  getCommentsForCellAt?(sheetId: SheetId, row: number, col: number): Comment[];
   /**
    * Get all conditional formatting rules for a sheet.
    * Used to capture CF rules within the copied selection.
@@ -108,6 +102,15 @@ export interface BuildClipboardDataOptions {
    * Defaults to true to match Excel behavior.
    */
   skipHidden?: boolean;
+}
+
+export interface SparseClipboardCellEntry {
+  row: number;
+  col: number;
+  cellData?: StoreCellData;
+  format?: CellFormat;
+  comments?: RelativeComment[];
+  hideFormula?: boolean;
 }
 
 // =============================================================================
@@ -160,8 +163,11 @@ export function buildClipboardData(
           continue;
         }
 
-        // Use visible indices for relative positioning (compacted)
-        const key = `${visibleRowIndex},${visibleColIndex}`;
+        // Normal copies keep sparse offsets relative to the original selection
+        // origin. Hidden-row compaction is the only mode that rewrites offsets.
+        const key = skipHidden
+          ? `${visibleRowIndex},${visibleColIndex}`
+          : `${row - normalized.startRow},${col - normalized.startCol}`;
 
         const cellData = store.getCellData(sheetId, row, col);
         const format = store.getCellFormat(sheetId, row, col);
@@ -203,7 +209,78 @@ export function buildClipboardData(
     sourceRanges: ranges,
     cells,
     sourceSheetId: sheetId,
-    timestamp: Date.now(),
+    merges: merges.length > 0 ? merges : undefined,
+    validation: validation.length > 0 ? validation : undefined,
+    conditionalFormatting: conditionalFormatting.length > 0 ? conditionalFormatting : undefined,
+    sourceColumnWidths: sourceColumnWidths.some((w) => w !== undefined)
+      ? sourceColumnWidths
+      : undefined,
+  };
+}
+
+/**
+ * Build ClipboardData from already sparse absolute-position entries.
+ *
+ * Whole-row and whole-column copies must keep offsets relative to the original
+ * full-shape selection without enumerating the full sheet extent. This entry
+ * point shares the same cell conversion and metadata capture contract as the
+ * rectangular builder while letting the caller supply only populated cells.
+ */
+export function buildSparseClipboardData(
+  ranges: CellRange[],
+  sheetId: SheetId,
+  entries: SparseClipboardCellEntry[],
+  store: ClipboardStoreReader,
+  options: BuildClipboardDataOptions = {},
+): ClipboardData {
+  const cells: Record<string, ClipboardCellData> = {};
+  const { skipHidden = false } = options;
+  const firstRange = ranges[0];
+  if (!firstRange) {
+    return {
+      sourceRanges: ranges,
+      cells,
+      sourceSheetId: sheetId,
+    };
+  }
+
+  const origin = normalizeRange(firstRange);
+  const sortedEntries = [...entries].sort((a, b) => a.row - b.row || a.col - b.col);
+  const visibleRowOffsets = skipHidden
+    ? buildSparseVisibleOffsetMap(sortedEntries, sheetId, store, 'row')
+    : null;
+  const visibleColOffsets = skipHidden
+    ? buildSparseVisibleOffsetMap(sortedEntries, sheetId, store, 'col')
+    : null;
+
+  for (const entry of sortedEntries) {
+    if (!isCellInRanges(entry.row, entry.col, ranges)) continue;
+
+    const rowOffset = skipHidden ? visibleRowOffsets?.get(entry.row) : entry.row - origin.startRow;
+    const colOffset = skipHidden ? visibleColOffsets?.get(entry.col) : entry.col - origin.startCol;
+    if (rowOffset === undefined || colOffset === undefined) continue;
+
+    const clipboardCell = buildClipboardCellData(
+      entry.cellData,
+      entry.format,
+      entry.comments ?? captureCommentsForCell(sheetId, entry.row, entry.col, store),
+      entry.hideFormula,
+    );
+
+    if (hasContent(clipboardCell)) {
+      cells[`${rowOffset},${colOffset}`] = clipboardCell;
+    }
+  }
+
+  const merges = captureMergesInRanges(ranges, sheetId, store);
+  const validation = captureValidationInRanges(ranges, sheetId, store);
+  const conditionalFormatting = captureCFInRanges(ranges, sheetId, store);
+  const sourceColumnWidths = captureColumnWidths(ranges, sheetId, store, skipHidden);
+
+  return {
+    sourceRanges: ranges,
+    cells,
+    sourceSheetId: sheetId,
     merges: merges.length > 0 ? merges : undefined,
     validation: validation.length > 0 ? validation : undefined,
     conditionalFormatting: conditionalFormatting.length > 0 ? conditionalFormatting : undefined,
@@ -216,6 +293,39 @@ export function buildClipboardData(
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+function isCellInRanges(row: number, col: number, ranges: CellRange[]): boolean {
+  return ranges.some((range) => {
+    const normalized = normalizeRange(range);
+    return (
+      row >= normalized.startRow &&
+      row <= normalized.endRow &&
+      col >= normalized.startCol &&
+      col <= normalized.endCol
+    );
+  });
+}
+
+function buildSparseVisibleOffsetMap(
+  entries: SparseClipboardCellEntry[],
+  sheetId: SheetId,
+  store: ClipboardStoreReader,
+  axis: 'row' | 'col',
+): Map<number, number> {
+  const result = new Map<number, number>();
+  let visibleIndex = 0;
+  const indices = new Set(entries.map((entry) => (axis === 'row' ? entry.row : entry.col)));
+  for (const index of [...indices].sort((a, b) => a - b)) {
+    const hidden =
+      axis === 'row' ? store.isRowHidden?.(sheetId, index) : store.isColHidden?.(sheetId, index);
+    if (hidden) continue;
+    if (!result.has(index)) {
+      result.set(index, visibleIndex);
+      visibleIndex++;
+    }
+  }
+  return result;
+}
 
 /**
  * Capture column widths for copied columns.
@@ -541,19 +651,7 @@ function captureCommentsForCell(
   col: number,
   store: ClipboardStoreReader,
 ): RelativeComment[] | undefined {
-  // Skip if store doesn't support comment reading
-  if (!store.getCellIdAt || !store.getCommentsForCell) {
-    return undefined;
-  }
-
-  // Get CellId for this position
-  const cellId = store.getCellIdAt(sheetId, row, col);
-  if (!cellId) {
-    return undefined;
-  }
-
-  // Get comments for this cell
-  const comments = store.getCommentsForCell(sheetId, cellId);
+  const comments = store.getCommentsForCellAt?.(sheetId, row, col);
   if (!comments || comments.length === 0) {
     return undefined;
   }
@@ -568,8 +666,11 @@ function captureCommentsForCell(
       author: comment.author,
       authorId: comment.authorId,
       content: extractPlainTextFromComment(comment),
-      createdAt: comment.createdAt,
+      createdAt: comment.createdAt ?? Date.now(),
       resolved: comment.resolved,
+      commentType: comment.commentType,
+      threadId: comment.threadId,
+      parentId: comment.parentId,
     }),
   );
 }
@@ -579,11 +680,13 @@ function captureCommentsForCell(
  * For clipboard purposes, we flatten rich text to plain string.
  */
 function extractPlainTextFromComment(comment: Comment): string {
-  if (!comment.content || !Array.isArray(comment.content)) {
-    return '';
+  if (typeof comment.content === 'string') {
+    return comment.content;
   }
-  // RichText is an array of RichTextSegment, each with a 'text' property
-  return comment.content.map((segment) => segment.text ?? '').join('');
+  if (Array.isArray(comment.runs) && comment.runs.length > 0) {
+    return comment.runs.map((segment) => segment.text ?? '').join('');
+  }
+  return '';
 }
 
 /**

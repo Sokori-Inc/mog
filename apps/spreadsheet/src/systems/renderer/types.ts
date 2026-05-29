@@ -12,6 +12,7 @@
 import type { rendererSelectors } from '../../selectors';
 import type { PendingAction, RendererAccessor, RendererCommands } from '@mog-sdk/contracts/actors';
 
+import type { SheetId } from '@mog-sdk/contracts/core';
 import type { FrozenPanes, GridRenderer } from '@mog-sdk/contracts/rendering';
 import type { ISparklineManager as ContractSparklineManager } from '@mog-sdk/contracts/sparklines';
 import type { Point, ViewportLayout } from '@mog-sdk/contracts/viewport';
@@ -40,13 +41,15 @@ import type { Metric } from '../shared/types';
  */
 export interface RendererUIStore {
   /** Currently active sheet ID */
-  activeSheetId: string;
+  activeSheetId: SheetId;
   /** Contextual tabs state */
   contextualTabs: {
     hasSparklineInActiveCell: boolean;
   };
   /** Set whether active cell has a sparkline */
   setHasSparklineInActiveCell: (has: boolean) => void;
+  /** Optional zoom writer when renderer-owned commands update zoom directly. */
+  setZoomLevel?: (sheetId: SheetId, level: number) => void;
 }
 
 // Actor types (for useSelector hook subscriptions)

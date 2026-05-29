@@ -181,9 +181,9 @@ describe('ViewportFetchManager', () => {
       expect(registerCall).toBeDefined();
       const [, args] = registerCall!;
       expect(args.startRow).toBe(0);
-      expect(args.endRow).toBe(114);
+      expect(args.endRow).toBe(82);
       expect(args.startCol).toBe(0);
-      expect(args.endCol).toBe(180);
+      expect(args.endCol).toBe(144);
     });
   });
 
@@ -433,6 +433,33 @@ describe('ViewportFetchManager', () => {
       expect(events).toContain('frozen:fetch-committed');
     });
 
+    it('restores per-viewport metadata after invalidation', async () => {
+      const transport = makeMockTransport();
+      const { manager } = createManager(transport);
+
+      await manager.refresh('main', 'sheet-1', bounds);
+      const expectedVisibleBounds = { ...bounds };
+
+      manager.invalidateAllPrefetch();
+      let state = manager.getPerViewportStates().get('main')!;
+      expect(state.prefetchBounds).toBeNull();
+      expect(state.lastVisibleBounds).toBeNull();
+
+      await manager.forceRefreshAllViewports();
+
+      state = manager.getPerViewportStates().get('main')!;
+      expect(state.prefetchBounds).not.toBeNull();
+      expect(state.prefetchBounds).toEqual({
+        startRow: manager.getBuffer('main')!.getBounds()!.startRow,
+        startCol: manager.getBuffer('main')!.getBounds()!.startCol,
+        endRow: manager.getBuffer('main')!.getBounds()!.endRow,
+        endCol: manager.getBuffer('main')!.getBounds()!.endCol,
+      });
+      expect(state.lastVisibleBounds).toEqual(expectedVisibleBounds);
+      expect(state.prefetchDirtyState.dirtyRegion).toBeNull();
+      expect(state.prefetchDirtyState.staleCells.size).toBe(0);
+    });
+
     it('is a no-op when no viewports are registered', async () => {
       const transport = makeMockTransport();
       const { manager } = createManager(transport);
@@ -467,6 +494,40 @@ describe('ViewportFetchManager', () => {
         'compute_get_viewport_binary',
         expect.objectContaining({ sheetId: 'sheet-1' }),
       );
+    });
+
+    it('restores metadata only for invalidated viewports on the target sheet', async () => {
+      const transport = makeMockTransport();
+      const { manager } = createManager(transport);
+
+      await manager.refresh('main:sheet-1', 'sheet-1', bounds);
+      await manager.refresh('main:sheet-2', 'sheet-2', bounds);
+      const expectedVisibleBounds = { ...bounds };
+
+      manager.invalidateAllPrefetch();
+      let sheet1State = manager.getPerViewportStates().get('main:sheet-1')!;
+      let sheet2State = manager.getPerViewportStates().get('main:sheet-2')!;
+      expect(sheet1State.prefetchBounds).toBeNull();
+      expect(sheet1State.lastVisibleBounds).toBeNull();
+      expect(sheet2State.prefetchBounds).toBeNull();
+      expect(sheet2State.lastVisibleBounds).toBeNull();
+
+      await manager.forceRefreshSheetViewports('sheet-2');
+
+      sheet1State = manager.getPerViewportStates().get('main:sheet-1')!;
+      sheet2State = manager.getPerViewportStates().get('main:sheet-2')!;
+      expect(sheet1State.prefetchBounds).toBeNull();
+      expect(sheet1State.lastVisibleBounds).toBeNull();
+      expect(sheet2State.prefetchBounds).not.toBeNull();
+      expect(sheet2State.prefetchBounds).toEqual({
+        startRow: manager.getBuffer('main:sheet-2')!.getBounds()!.startRow,
+        startCol: manager.getBuffer('main:sheet-2')!.getBounds()!.startCol,
+        endRow: manager.getBuffer('main:sheet-2')!.getBounds()!.endRow,
+        endCol: manager.getBuffer('main:sheet-2')!.getBounds()!.endCol,
+      });
+      expect(sheet2State.lastVisibleBounds).toEqual(expectedVisibleBounds);
+      expect(sheet2State.prefetchDirtyState.dirtyRegion).toBeNull();
+      expect(sheet2State.prefetchDirtyState.staleCells.size).toBe(0);
     });
   });
 

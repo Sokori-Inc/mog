@@ -8,6 +8,8 @@
 //! - `text` — Rich text body, paragraphs, run properties, bullets
 //! - `styling` — Fills, outlines, effects, hyperlinks, style references
 
+use std::collections::{HashMap, HashSet};
+
 mod objects;
 mod styling;
 mod text;
@@ -37,15 +39,52 @@ pub struct DrawingWriter {
     /// Each entry is (attr_name, attr_value), e.g. ("xmlns:xdr", "http://...").
     /// When set, these are emitted instead of the hardcoded defaults.
     root_namespace_attrs: Vec<(String, String)>,
+    suppress_unregistered_relationships: bool,
+    registered_relationship_ids: HashSet<String>,
 }
 
 impl DrawingWriter {
+    pub(super) fn write_raw_xml_if_relationship_safe(w: &mut XmlWriter, raw_xml: &str) -> bool {
+        if crate::infra::xml::raw_xml_contains_relationship_attr(raw_xml) {
+            return false;
+        }
+        w.raw_str(raw_xml);
+        true
+    }
+
+    pub(super) fn write_raw_xml(&self, w: &mut XmlWriter, raw_xml: &str) -> bool {
+        if self.suppress_unregistered_relationships {
+            let relationship_ids = crate::infra::xml::relationship_attr_values(raw_xml);
+            if !relationship_ids.is_empty()
+                && relationship_ids
+                    .iter()
+                    .all(|id| self.registered_relationship_ids.contains(id))
+            {
+                w.raw_str(raw_xml);
+                return true;
+            }
+            return Self::write_raw_xml_if_relationship_safe(w, raw_xml);
+        }
+        w.raw_str(raw_xml);
+        true
+    }
+
     /// Create a new drawing writer
     pub fn new() -> Self {
         Self {
             anchors: Vec::new(),
             root_namespace_attrs: Vec::new(),
+            suppress_unregistered_relationships: false,
+            registered_relationship_ids: HashSet::new(),
         }
+    }
+
+    pub fn set_suppress_unregistered_relationships(&mut self, suppress: bool) {
+        self.suppress_unregistered_relationships = suppress;
+    }
+
+    pub(super) fn can_write_relationship_id(&self, r_id: &str) -> bool {
+        !self.suppress_unregistered_relationships || self.registered_relationship_ids.contains(r_id)
     }
 
     /// Set the original root element namespace declarations for round-trip fidelity.
@@ -178,6 +217,180 @@ impl DrawingWriter {
         self
     }
 
+    /// Remap embedded relationship IDs after package graph resolution.
+    pub fn remap_relationship_ids(&mut self, resolved_ids: &HashMap<String, String>) {
+        self.registered_relationship_ids = resolved_ids.values().cloned().collect();
+        for anchor in &mut self.anchors {
+            let obj = match anchor {
+                DrawingAnchor::TwoCell(_, obj)
+                | DrawingAnchor::OneCell(_, obj)
+                | DrawingAnchor::Absolute(_, obj) => obj,
+            };
+            Self::remap_object_relationship_ids(obj, resolved_ids);
+        }
+    }
+
+    fn remap_object_relationship_ids(
+        obj: &mut DrawingObject,
+        resolved_ids: &HashMap<String, String>,
+    ) {
+        match obj {
+            DrawingObject::Picture(image) => {
+                if !image.r_id.is_empty() {
+                    if let Some(resolved) = resolved_ids.get(&image.r_id) {
+                        image.r_id = resolved.clone();
+                    }
+                }
+                Self::remap_hyperlink_relationship_id(&mut image.hlink_click, resolved_ids);
+                Self::remap_hyperlink_relationship_id(&mut image.hlink_hover, resolved_ids);
+                if let Some(link_id) = &mut image.link_id {
+                    if let Some(resolved) = resolved_ids.get(link_id) {
+                        *link_id = resolved.clone();
+                    }
+                }
+                image.blip_ext_lst = image
+                    .blip_ext_lst
+                    .as_ref()
+                    .map(|raw| crate::infra::xml::remap_relationship_attrs(raw, resolved_ids));
+                image.nv_ext_lst = image
+                    .nv_ext_lst
+                    .as_ref()
+                    .map(|raw| crate::infra::xml::remap_relationship_attrs(raw, resolved_ids));
+                image.sp_pr_ext_lst = image
+                    .sp_pr_ext_lst
+                    .as_ref()
+                    .map(|raw| crate::infra::xml::remap_relationship_attrs(raw, resolved_ids));
+            }
+            DrawingObject::Chart(chart) => {
+                Self::remap_hyperlink_relationship_id(&mut chart.hlink_click, resolved_ids);
+                Self::remap_hyperlink_relationship_id(&mut chart.hlink_hover, resolved_ids);
+                if let Some(resolved) = resolved_ids.get(&chart.r_id) {
+                    chart.r_id = resolved.clone();
+                }
+            }
+            DrawingObject::ChartEx(chart_ex) => {
+                if let Some(resolved) = resolved_ids.get(&chart_ex.r_id) {
+                    chart_ex.r_id = resolved.clone();
+                }
+            }
+            DrawingObject::Slicer { r_id, .. } => {
+                if let Some(resolved) = resolved_ids.get(r_id) {
+                    *r_id = resolved.clone();
+                }
+            }
+            DrawingObject::GraphicFrame(gf) => {
+                gf.raw_xml = crate::infra::xml::remap_relationship_attrs(&gf.raw_xml, resolved_ids);
+            }
+            DrawingObject::OpaqueRaw(raw) => {
+                raw.raw_xml =
+                    crate::infra::xml::remap_relationship_attrs(&raw.raw_xml, resolved_ids);
+            }
+            DrawingObject::ContentPart(content_part) => {
+                if let Some(resolved) = resolved_ids.get(&content_part.r_id) {
+                    content_part.r_id = resolved.clone();
+                }
+            }
+            DrawingObject::GroupShape(group) => {
+                Self::remap_hyperlink_relationship_id(&mut group.hlink_click, resolved_ids);
+                Self::remap_hyperlink_relationship_id(&mut group.hlink_hover, resolved_ids);
+                group.nv_ext_lst = group
+                    .nv_ext_lst
+                    .as_ref()
+                    .map(|raw| crate::infra::xml::remap_relationship_attrs(raw, resolved_ids));
+                group.ext_lst = group
+                    .ext_lst
+                    .as_ref()
+                    .map(|raw| crate::infra::xml::remap_relationship_attrs(raw, resolved_ids));
+                for child in &mut group.children {
+                    Self::remap_object_relationship_ids(child, resolved_ids);
+                }
+            }
+            DrawingObject::TextBox(text_box) => {
+                Self::remap_hyperlink_relationship_id(&mut text_box.hlink_click, resolved_ids);
+                Self::remap_hyperlink_relationship_id(&mut text_box.hlink_hover, resolved_ids);
+                if let Some(text_body) = &mut text_box.text_body {
+                    Self::remap_text_body_hyperlink_relationship_ids(text_body, resolved_ids);
+                }
+            }
+            DrawingObject::Connector(connector) => {
+                Self::remap_hyperlink_relationship_id(&mut connector.hlink_click, resolved_ids);
+                Self::remap_hyperlink_relationship_id(&mut connector.hlink_hover, resolved_ids);
+            }
+            _ => {}
+        }
+    }
+
+    fn remap_hyperlink_relationship_id(
+        hlink: &mut Option<ooxml_types::drawings::Hyperlink>,
+        resolved_ids: &HashMap<String, String>,
+    ) {
+        let Some(hlink) = hlink else {
+            return;
+        };
+        let Some(r_id) = &mut hlink.r_id else {
+            return;
+        };
+        if let Some(resolved) = resolved_ids.get(r_id) {
+            *r_id = resolved.clone();
+        }
+    }
+
+    fn remap_text_body_hyperlink_relationship_ids(
+        text_body: &mut ooxml_types::drawings::TextBody,
+        resolved_ids: &HashMap<String, String>,
+    ) {
+        for paragraph in &mut text_body.paragraphs {
+            if let Some(props) = paragraph.props.def_run_props.as_deref_mut() {
+                Self::remap_run_property_hyperlink_relationship_ids(props, resolved_ids);
+            }
+            if let Some(props) = &mut paragraph.end_para_rpr {
+                Self::remap_run_property_hyperlink_relationship_ids(props, resolved_ids);
+            }
+            for run in &mut paragraph.runs {
+                match run {
+                    ooxml_types::drawings::TextRunContent::Run(run) => {
+                        Self::remap_run_property_hyperlink_relationship_ids(
+                            &mut run.props,
+                            resolved_ids,
+                        );
+                    }
+                    ooxml_types::drawings::TextRunContent::LineBreak { props: Some(props) } => {
+                        Self::remap_run_property_hyperlink_relationship_ids(props, resolved_ids);
+                    }
+                    ooxml_types::drawings::TextRunContent::Field {
+                        run_props,
+                        para_props,
+                        ..
+                    } => {
+                        if let Some(props) = run_props {
+                            Self::remap_run_property_hyperlink_relationship_ids(
+                                props,
+                                resolved_ids,
+                            );
+                        }
+                        if let Some(para_props) = para_props {
+                            if let Some(props) = para_props.def_run_props.as_deref_mut() {
+                                Self::remap_run_property_hyperlink_relationship_ids(
+                                    props,
+                                    resolved_ids,
+                                );
+                            }
+                        }
+                    }
+                    ooxml_types::drawings::TextRunContent::LineBreak { props: None } => {}
+                }
+            }
+        }
+    }
+
+    fn remap_run_property_hyperlink_relationship_ids(
+        props: &mut ooxml_types::drawings::RunProperties,
+        resolved_ids: &HashMap<String, String>,
+    ) {
+        Self::remap_hyperlink_relationship_id(&mut props.hlink_click, resolved_ids);
+        Self::remap_hyperlink_relationship_id(&mut props.hlink_mouse_over, resolved_ids);
+    }
+
     /// Insert a drawing anchor at a specific position.
     /// If `index` is beyond the current length, appends to the end.
     pub fn insert_anchor(&mut self, index: usize, anchor: DrawingAnchor) -> &mut Self {
@@ -208,6 +421,18 @@ impl DrawingWriter {
         })
     }
 
+    /// Check if any anchor contains a timeline object.
+    fn has_timelines(&self) -> bool {
+        self.anchors.iter().any(|a| {
+            let obj = match a {
+                DrawingAnchor::TwoCell(_, o) => o,
+                DrawingAnchor::OneCell(_, o) => o,
+                DrawingAnchor::Absolute(_, o) => o,
+            };
+            matches!(obj, DrawingObject::Timeline { .. })
+        })
+    }
+
     /// Check if any anchor contains a ChartEx object.
     fn has_chart_ex(&self) -> bool {
         self.anchors.iter().any(|a| {
@@ -229,11 +454,82 @@ impl DrawingWriter {
             DrawingObject::ChartEx(_) => true,
             DrawingObject::SmartArt(_) => true,
             DrawingObject::GraphicFrame(_) => true,
+            DrawingObject::OpaqueRaw(_) => true,
+            DrawingObject::ContentPart(_) => true,
             // Group shapes need r: if any child does
-            DrawingObject::GroupShape(g) => g.children.iter().any(Self::object_needs_r_namespace),
-            // Shapes, TextBoxes, Connectors, Slicers don't inherently use r:
+            DrawingObject::GroupShape(g) => {
+                Self::hyperlink_needs_r_namespace(&g.hlink_click)
+                    || Self::hyperlink_needs_r_namespace(&g.hlink_hover)
+                    || g.children.iter().any(Self::object_needs_r_namespace)
+            }
+            DrawingObject::TextBox(text_box) => {
+                Self::hyperlink_needs_r_namespace(&text_box.hlink_click)
+                    || Self::hyperlink_needs_r_namespace(&text_box.hlink_hover)
+                    || text_box
+                        .text_body
+                        .as_ref()
+                        .is_some_and(Self::text_body_needs_r_namespace)
+            }
+            DrawingObject::Connector(connector) => {
+                Self::hyperlink_needs_r_namespace(&connector.hlink_click)
+                    || Self::hyperlink_needs_r_namespace(&connector.hlink_hover)
+            }
+            // Shapes and Slicers don't inherently use r:
             _ => false,
         }
+    }
+
+    fn hyperlink_needs_r_namespace(hlink: &Option<ooxml_types::drawings::Hyperlink>) -> bool {
+        hlink
+            .as_ref()
+            .and_then(|hlink| hlink.r_id.as_deref())
+            .is_some_and(|r_id| Self::is_relationship_id_writable_static(r_id))
+    }
+
+    fn is_relationship_id_writable_static(r_id: &str) -> bool {
+        !r_id.is_empty()
+    }
+
+    fn text_body_needs_r_namespace(text_body: &ooxml_types::drawings::TextBody) -> bool {
+        text_body.paragraphs.iter().any(|paragraph| {
+            paragraph
+                .props
+                .def_run_props
+                .as_deref()
+                .is_some_and(Self::run_properties_need_r_namespace)
+                || paragraph
+                    .end_para_rpr
+                    .as_ref()
+                    .is_some_and(Self::run_properties_need_r_namespace)
+                || paragraph.runs.iter().any(|run| match run {
+                    ooxml_types::drawings::TextRunContent::Run(run) => {
+                        Self::run_properties_need_r_namespace(&run.props)
+                    }
+                    ooxml_types::drawings::TextRunContent::LineBreak { props } => props
+                        .as_ref()
+                        .is_some_and(Self::run_properties_need_r_namespace),
+                    ooxml_types::drawings::TextRunContent::Field {
+                        run_props,
+                        para_props,
+                        ..
+                    } => {
+                        run_props
+                            .as_ref()
+                            .is_some_and(Self::run_properties_need_r_namespace)
+                            || para_props.as_ref().is_some_and(|para_props| {
+                                para_props
+                                    .def_run_props
+                                    .as_deref()
+                                    .is_some_and(Self::run_properties_need_r_namespace)
+                            })
+                    }
+                })
+        })
+    }
+
+    fn run_properties_need_r_namespace(props: &ooxml_types::drawings::RunProperties) -> bool {
+        Self::hyperlink_needs_r_namespace(&props.hlink_click)
+            || Self::hyperlink_needs_r_namespace(&props.hlink_mouse_over)
     }
 
     /// Check if any anchor in this drawing needs the `xmlns:r` namespace declaration.
@@ -254,16 +550,17 @@ impl DrawingWriter {
         w.write_declaration();
 
         let has_slicers = self.has_slicers();
+        let has_timelines = self.has_timelines();
         let has_chart_ex = self.has_chart_ex();
-        let needs_mc = has_slicers || has_chart_ex;
+        let needs_mc = has_slicers || has_timelines || has_chart_ex;
 
         // Start root element with namespaces.
-        // If we have preserved namespace attrs from the original file, use those
+        // If we have root namespace attrs from the original file, use those
         // to maintain round-trip fidelity (preserving prefixes and order).
         w.start_element("xdr:wsDr");
 
         if !self.root_namespace_attrs.is_empty() {
-            // Emit preserved namespace declarations from the original file.
+            // Emit root namespace declarations from the original file.
             for (attr_name, attr_value) in &self.root_namespace_attrs {
                 w.attr(attr_name, attr_value);
             }
@@ -315,7 +612,7 @@ impl DrawingWriter {
                     .iter()
                     .any(|(k, _)| k == "xmlns:cx");
                 // mc may have been added above for slicers; only add if still missing
-                if !has_mc && !has_slicers {
+                if !has_mc && !has_slicers && !has_timelines {
                     w.attr("xmlns:mc", NS_MC);
                 }
                 if !has_cx {
@@ -363,8 +660,9 @@ impl DrawingWriter {
             DrawingAnchor::TwoCell(two_cell, object) => {
                 // If the anchor was wrapped in mc:AlternateContent, emit the raw XML
                 // verbatim for perfect round-trip fidelity.
-                if let Some(ref mc) = two_cell.mc_alternate_content {
-                    w.raw_str(&mc.raw_xml);
+                if let Some(ref mc) = two_cell.mc_alternate_content
+                    && self.write_raw_xml(w, &mc.raw_xml)
+                {
                     return;
                 }
 
@@ -385,8 +683,9 @@ impl DrawingWriter {
                 // If the anchor was wrapped in mc:AlternateContent or contains
                 // content-level mc:AlternateContent (slicer/timeslicer), emit raw XML
                 // verbatim for perfect round-trip fidelity.
-                if let Some(ref mc) = one_cell.mc_alternate_content {
-                    w.raw_str(&mc.raw_xml);
+                if let Some(ref mc) = one_cell.mc_alternate_content
+                    && self.write_raw_xml(w, &mc.raw_xml)
+                {
                     return;
                 }
 
@@ -458,12 +757,43 @@ impl DrawingWriter {
             DrawingObject::Connector(props) => self.write_connector(w, props, object_id),
             DrawingObject::GroupShape(props) => self.write_group_shape(w, props, object_id),
             DrawingObject::GraphicFrame(gf) => self.write_graphic_frame(w, gf),
+            DrawingObject::OpaqueRaw(raw) => {
+                self.write_raw_xml(w, &raw.raw_xml);
+            }
+            DrawingObject::ContentPart(content_part) => {
+                w.start_element("xdr:contentPart")
+                    .attr("r:id", &content_part.r_id)
+                    .self_close();
+            }
             DrawingObject::SmartArt(sa) => self.write_smartart(w, sa, object_id),
             DrawingObject::Slicer {
                 original_id,
                 name,
                 r_id,
-            } => self.write_slicer(w, name, r_id, *original_id, object_id),
+                macro_name,
+                nv_ext_lst,
+            } => self.write_slicer(
+                w,
+                name,
+                r_id,
+                *original_id,
+                macro_name.as_deref(),
+                nv_ext_lst.as_deref(),
+                object_id,
+            ),
+            DrawingObject::Timeline {
+                original_id,
+                name,
+                macro_name,
+                nv_ext_lst,
+            } => self.write_timeline(
+                w,
+                name,
+                *original_id,
+                macro_name.as_deref(),
+                nv_ext_lst.as_deref(),
+                object_id,
+            ),
         }
     }
 }

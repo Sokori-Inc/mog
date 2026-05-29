@@ -292,12 +292,19 @@ pub struct Theme {
     /// Runtime color scheme preserving full ThemeColor variants for resolution
     pub(crate) runtime_colors: RuntimeColorScheme,
 
-    /// Raw XML content inside <a:objectDefaults>...</a:objectDefaults> (inner content only, no wrapper tags)
+    /// Current theme-owned inner XML for `<a:objectDefaults>`.
+    /// `None` means absent; `Some(vec![])` means present empty/self-closing.
     pub object_defaults_xml: Option<Vec<u8>>,
-    /// Raw XML content inside <a:extraClrSchemeLst>...</a:extraClrSchemeLst>
+    /// Current theme-owned inner XML for `<a:extraClrSchemeLst>`.
+    /// `None` means absent; `Some(vec![])` means present empty/self-closing.
     pub extra_clr_scheme_lst_xml: Option<Vec<u8>>,
-    /// Raw XML of <a:extLst>...</a:extLst> (full element including tags)
+    /// Current theme-owned raw XML of `<a:extLst>`, including the root element.
     pub ext_lst_xml: Option<Vec<u8>>,
+    /// Current theme-owned raw XML of `<a:custClrLst>`, including the root element.
+    pub cust_clr_lst_xml: Option<Vec<u8>>,
+    /// Current order of modeled root siblings after `themeElements`.
+    /// `None` uses generated-theme defaults; `Some(vec![])` means no siblings.
+    pub root_sibling_order: Option<Vec<String>>,
 }
 
 impl Theme {
@@ -328,8 +335,9 @@ impl Theme {
             // Parse runtime color scheme (preserves ThemeColor variants)
             theme.runtime_colors = RuntimeColorScheme::parse(elements_xml);
 
-            // Also produce the canonical color scheme (hex strings)
-            theme.color_scheme = theme.runtime_colors.to_canonical();
+            // Also produce the canonical color scheme, preserving every
+            // DrawingML color choice variant and transform where supported.
+            theme.color_scheme = super::colors::parse_color_scheme_canonical(elements_xml);
 
             // Parse font scheme (using canonical type directly)
             theme.font_scheme = parse_font_scheme(elements_xml);
@@ -348,74 +356,38 @@ impl Theme {
                     xml.len()
                 };
 
-            // Extract objectDefaults (inner content only)
-            if let Some(od_start) = find_tag_simd(xml, b"objectDefaults", after_elements) {
-                // Check if it's a self-closing tag
-                let mut is_self_closing = false;
-                if let Some(gt_pos) = xml[od_start..].iter().position(|&b| b == b'>') {
-                    if gt_pos > 0 && xml[od_start + gt_pos - 1] == b'/' {
-                        is_self_closing = true;
+            let root_siblings = collect_theme_root_siblings(xml, after_elements);
+            for sibling in &root_siblings {
+                match sibling.name.as_str() {
+                    "objectDefaults" => {
+                        theme.object_defaults_xml = Some(
+                            sibling
+                                .inner_range()
+                                .map_or_else(Vec::new, |range| xml[range].to_vec()),
+                        );
                     }
-                }
-                if !is_self_closing {
-                    // Find the end of the opening tag '>'
-                    if let Some(gt_offset) = xml[od_start..].iter().position(|&b| b == b'>') {
-                        let inner_start = od_start + gt_offset + 1;
-                        if let Some(close_pos) = find_closing_tag(xml, b"objectDefaults", od_start)
-                        {
-                            if close_pos > inner_start {
-                                theme.object_defaults_xml =
-                                    Some(xml[inner_start..close_pos].to_vec());
-                            }
-                        }
+                    "extraClrSchemeLst" => {
+                        theme.extra_clr_scheme_lst_xml = Some(
+                            sibling
+                                .inner_range()
+                                .map_or_else(Vec::new, |range| xml[range].to_vec()),
+                        );
                     }
-                }
-            }
-
-            // Extract extraClrSchemeLst (inner content only)
-            if let Some(ecsl_start) = find_tag_simd(xml, b"extraClrSchemeLst", after_elements) {
-                let mut is_self_closing = false;
-                if let Some(gt_pos) = xml[ecsl_start..].iter().position(|&b| b == b'>') {
-                    if gt_pos > 0 && xml[ecsl_start + gt_pos - 1] == b'/' {
-                        is_self_closing = true;
+                    "custClrLst" => {
+                        theme.cust_clr_lst_xml = Some(xml[sibling.full_range()].to_vec());
                     }
-                }
-                if !is_self_closing {
-                    if let Some(gt_offset) = xml[ecsl_start..].iter().position(|&b| b == b'>') {
-                        let inner_start = ecsl_start + gt_offset + 1;
-                        if let Some(close_pos) =
-                            find_closing_tag(xml, b"extraClrSchemeLst", ecsl_start)
-                        {
-                            if close_pos > inner_start {
-                                theme.extra_clr_scheme_lst_xml =
-                                    Some(xml[inner_start..close_pos].to_vec());
-                            }
-                        }
+                    "extLst" => {
+                        theme.ext_lst_xml = Some(xml[sibling.full_range()].to_vec());
                     }
+                    _ => {}
                 }
             }
-
-            // Extract extLst (full element including tags)
-            if let Some(ext_start) = find_tag_simd(xml, b"extLst", after_elements) {
-                // Check if it's a self-closing tag
-                let mut is_self_closing = false;
-                if let Some(gt_pos) = xml[ext_start..].iter().position(|&b| b == b'>') {
-                    if gt_pos > 0 && xml[ext_start + gt_pos - 1] == b'/' {
-                        is_self_closing = true;
-                    }
-                }
-                if is_self_closing {
-                    // Include the full self-closing tag
-                    if let Some(gt_pos) = xml[ext_start..].iter().position(|&b| b == b'>') {
-                        theme.ext_lst_xml = Some(xml[ext_start..ext_start + gt_pos + 1].to_vec());
-                    }
-                } else if let Some(close_pos) = find_closing_tag(xml, b"extLst", ext_start) {
-                    // Include from '<a:extLst' through '</a:extLst>'
-                    if let Some(gt_pos) = xml[close_pos..].iter().position(|&b| b == b'>') {
-                        theme.ext_lst_xml = Some(xml[ext_start..close_pos + gt_pos + 1].to_vec());
-                    }
-                }
-            }
+            theme.root_sibling_order = Some(
+                root_siblings
+                    .into_iter()
+                    .map(|sibling| sibling.name)
+                    .collect(),
+            );
         }
 
         theme
@@ -502,5 +474,849 @@ impl Theme {
             _ => return None,
         };
         Some(RgbColor::new(rgb.0, rgb.1, rgb.2))
+    }
+}
+
+#[derive(Debug)]
+struct ThemeRootSibling {
+    name: String,
+    start: usize,
+    open_end: usize,
+    close_start: Option<usize>,
+    end: usize,
+}
+
+impl ThemeRootSibling {
+    fn full_range(&self) -> std::ops::Range<usize> {
+        self.start..self.end
+    }
+
+    fn inner_range(&self) -> Option<std::ops::Range<usize>> {
+        self.close_start
+            .map(|close_start| self.open_end..close_start)
+    }
+}
+
+#[derive(Debug)]
+struct ElementStart<'a> {
+    gt_pos: usize,
+    local_name: &'a [u8],
+    is_closing: bool,
+    is_special: bool,
+    is_self_closing: bool,
+}
+
+fn collect_theme_root_siblings(xml: &[u8], after_elements: usize) -> Vec<ThemeRootSibling> {
+    let mut siblings = Vec::new();
+    let mut pos = after_elements;
+
+    while let Some(rel_lt) = xml[pos..].iter().position(|&b| b == b'<') {
+        let start = pos + rel_lt;
+        let Some(element) = parse_element_start(xml, start) else {
+            break;
+        };
+
+        if element.is_special {
+            pos = element.gt_pos + 1;
+            continue;
+        }
+
+        if element.is_closing {
+            break;
+        }
+
+        let Some(name) = theme_root_sibling_name(element.local_name) else {
+            pos = element_end(
+                xml,
+                element.local_name,
+                start,
+                element.gt_pos,
+                element.is_self_closing,
+            )
+            .unwrap_or(element.gt_pos + 1);
+            continue;
+        };
+
+        let open_end = element.gt_pos + 1;
+        if element.is_self_closing {
+            siblings.push(ThemeRootSibling {
+                name: name.to_string(),
+                start,
+                open_end,
+                close_start: None,
+                end: open_end,
+            });
+            pos = open_end;
+        } else if let Some(close_start) = find_closing_tag(xml, element.local_name, start) {
+            if let Some(close_gt_rel) = xml[close_start..].iter().position(|&b| b == b'>') {
+                let end = close_start + close_gt_rel + 1;
+                siblings.push(ThemeRootSibling {
+                    name: name.to_string(),
+                    start,
+                    open_end,
+                    close_start: Some(close_start),
+                    end,
+                });
+                pos = end;
+            } else {
+                break;
+            }
+        } else {
+            pos = open_end;
+        }
+    }
+
+    siblings
+}
+
+fn element_end(
+    xml: &[u8],
+    local_name: &[u8],
+    start: usize,
+    gt_pos: usize,
+    is_self_closing: bool,
+) -> Option<usize> {
+    if is_self_closing {
+        return Some(gt_pos + 1);
+    }
+    let close_start = find_closing_tag(xml, local_name, start)?;
+    let close_gt = xml[close_start..].iter().position(|&b| b == b'>')?;
+    Some(close_start + close_gt + 1)
+}
+
+fn parse_element_start(xml: &[u8], start: usize) -> Option<ElementStart<'_>> {
+    if xml.get(start) != Some(&b'<') {
+        return None;
+    }
+
+    let gt_pos = start + xml[start..].iter().position(|&b| b == b'>')?;
+    let mut name_start = start + 1;
+    let first = *xml.get(name_start)?;
+    let is_closing = first == b'/';
+    let is_special = first == b'!' || first == b'?';
+    if is_closing {
+        name_start += 1;
+    }
+    if is_special {
+        return Some(ElementStart {
+            gt_pos,
+            local_name: &[],
+            is_closing,
+            is_special,
+            is_self_closing: false,
+        });
+    }
+
+    while name_start < gt_pos && is_xml_space(xml[name_start]) {
+        name_start += 1;
+    }
+    let mut name_end = name_start;
+    while name_end < gt_pos
+        && !is_xml_space(xml[name_end])
+        && xml[name_end] != b'/'
+        && xml[name_end] != b'>'
+    {
+        name_end += 1;
+    }
+
+    let local_name = local_name(&xml[name_start..name_end]);
+    let is_self_closing = xml[start..gt_pos]
+        .iter()
+        .rev()
+        .find(|&&b| !is_xml_space(b))
+        .is_some_and(|&b| b == b'/');
+
+    Some(ElementStart {
+        gt_pos,
+        local_name,
+        is_closing,
+        is_special,
+        is_self_closing,
+    })
+}
+
+fn local_name(name: &[u8]) -> &[u8] {
+    name.iter()
+        .rposition(|&b| b == b':')
+        .map_or(name, |colon| &name[colon + 1..])
+}
+
+fn theme_root_sibling_name(local_name: &[u8]) -> Option<&'static str> {
+    match local_name {
+        b"objectDefaults" => Some("objectDefaults"),
+        b"extraClrSchemeLst" => Some("extraClrSchemeLst"),
+        b"custClrLst" => Some("custClrLst"),
+        b"extLst" => Some("extLst"),
+        _ => None,
+    }
+}
+
+fn is_xml_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\n' | b'\r' | b'\t')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rgb_color_new() {
+        let color = RgbColor::new(255, 128, 64);
+        assert_eq!(color.a, 255);
+        assert_eq!(color.r, 255);
+        assert_eq!(color.g, 128);
+        assert_eq!(color.b, 64);
+    }
+
+    #[test]
+    fn test_rgb_color_new_argb() {
+        let color = RgbColor::new_argb(128, 255, 128, 64);
+        assert_eq!(color.a, 128);
+        assert_eq!(color.r, 255);
+        assert_eq!(color.g, 128);
+        assert_eq!(color.b, 64);
+    }
+
+    #[test]
+    fn test_rgb_color_from_hex_6() {
+        let color = RgbColor::from_hex("4472C4").unwrap();
+        assert_eq!(color.a, 255);
+        assert_eq!(color.r, 0x44);
+        assert_eq!(color.g, 0x72);
+        assert_eq!(color.b, 0xC4);
+    }
+
+    #[test]
+    fn test_rgb_color_from_hex_8() {
+        let color = RgbColor::from_hex("FF4472C4").unwrap();
+        assert_eq!(color.a, 0xFF);
+        assert_eq!(color.r, 0x44);
+        assert_eq!(color.g, 0x72);
+        assert_eq!(color.b, 0xC4);
+    }
+
+    #[test]
+    fn test_rgb_color_from_hex_invalid() {
+        assert!(RgbColor::from_hex("123").is_none());
+        assert!(RgbColor::from_hex("12345").is_none());
+        assert!(RgbColor::from_hex("GGGGGG").is_none());
+    }
+
+    #[test]
+    fn test_rgb_color_to_hex() {
+        let color = RgbColor::new(0x44, 0x72, 0xC4);
+        assert_eq!(color.to_hex(), "4472C4");
+    }
+
+    #[test]
+    fn test_rgb_color_to_hex_argb() {
+        let color = RgbColor::new_argb(0xFF, 0x44, 0x72, 0xC4);
+        assert_eq!(color.to_hex_argb(), "FF4472C4");
+    }
+
+    #[test]
+    fn test_rgb_color_apply_tint_positive() {
+        let color = RgbColor::new(128, 128, 128);
+        let tinted = color.apply_tint(0.5);
+        // Should lighten toward white
+        assert!(tinted.r > 128);
+        assert!(tinted.g > 128);
+        assert!(tinted.b > 128);
+    }
+
+    #[test]
+    fn test_rgb_color_apply_tint_negative() {
+        let color = RgbColor::new(128, 128, 128);
+        let tinted = color.apply_tint(-0.5);
+        // Should darken
+        assert!(tinted.r < 128);
+        assert!(tinted.g < 128);
+        assert!(tinted.b < 128);
+    }
+
+    #[test]
+    fn test_rgb_color_apply_tint_zero() {
+        let color = RgbColor::new(128, 128, 128);
+        let tinted = color.apply_tint(0.0);
+        assert_eq!(tinted, color);
+    }
+
+    #[test]
+    fn test_rgb_to_hsl_red() {
+        let color = RgbColor::new(255, 0, 0);
+        let (h, s, l) = color.to_hsl();
+        assert!((h - 0.0).abs() < 0.01, "Hue should be 0 for red, got {}", h);
+        assert!(
+            (s - 1.0).abs() < 0.01,
+            "Saturation should be 1 for pure red, got {}",
+            s
+        );
+        assert!(
+            (l - 0.5).abs() < 0.01,
+            "Lightness should be 0.5 for pure red, got {}",
+            l
+        );
+    }
+
+    #[test]
+    fn test_rgb_to_hsl_green() {
+        let color = RgbColor::new(0, 255, 0);
+        let (h, s, l) = color.to_hsl();
+        assert!(
+            (h - 120.0).abs() < 0.01,
+            "Hue should be 120 for green, got {}",
+            h
+        );
+        assert!(
+            (s - 1.0).abs() < 0.01,
+            "Saturation should be 1 for pure green, got {}",
+            s
+        );
+        assert!(
+            (l - 0.5).abs() < 0.01,
+            "Lightness should be 0.5 for pure green, got {}",
+            l
+        );
+    }
+
+    #[test]
+    fn test_rgb_to_hsl_blue() {
+        let color = RgbColor::new(0, 0, 255);
+        let (h, s, l) = color.to_hsl();
+        assert!(
+            (h - 240.0).abs() < 0.01,
+            "Hue should be 240 for blue, got {}",
+            h
+        );
+        assert!(
+            (s - 1.0).abs() < 0.01,
+            "Saturation should be 1 for pure blue, got {}",
+            s
+        );
+        assert!(
+            (l - 0.5).abs() < 0.01,
+            "Lightness should be 0.5 for pure blue, got {}",
+            l
+        );
+    }
+
+    #[test]
+    fn test_rgb_to_hsl_white() {
+        let color = RgbColor::new(255, 255, 255);
+        let (_h, s, l) = color.to_hsl();
+        // For achromatic colors, hue is undefined (we return 0)
+        assert!(
+            (s - 0.0).abs() < 0.01,
+            "Saturation should be 0 for white, got {}",
+            s
+        );
+        assert!(
+            (l - 1.0).abs() < 0.01,
+            "Lightness should be 1 for white, got {}",
+            l
+        );
+    }
+
+    #[test]
+    fn test_rgb_to_hsl_black() {
+        let color = RgbColor::new(0, 0, 0);
+        let (_h, s, l) = color.to_hsl();
+        // For achromatic colors, hue is undefined (we return 0)
+        assert!(
+            (s - 0.0).abs() < 0.01,
+            "Saturation should be 0 for black, got {}",
+            s
+        );
+        assert!(
+            (l - 0.0).abs() < 0.01,
+            "Lightness should be 0 for black, got {}",
+            l
+        );
+    }
+
+    #[test]
+    fn test_rgb_to_hsl_gray() {
+        let color = RgbColor::new(128, 128, 128);
+        let (_h, s, l) = color.to_hsl();
+        assert!(
+            (s - 0.0).abs() < 0.01,
+            "Saturation should be 0 for gray, got {}",
+            s
+        );
+        assert!(
+            (l - 0.502).abs() < 0.01,
+            "Lightness should be ~0.5 for mid gray, got {}",
+            l
+        );
+    }
+
+    #[test]
+    fn test_hsl_to_rgb_roundtrip() {
+        // Test that RGB -> HSL -> RGB preserves the color
+        let colors = vec![
+            RgbColor::new(255, 0, 0),        // Red
+            RgbColor::new(0, 255, 0),        // Green
+            RgbColor::new(0, 0, 255),        // Blue
+            RgbColor::new(255, 255, 0),      // Yellow
+            RgbColor::new(255, 0, 255),      // Magenta
+            RgbColor::new(0, 255, 255),      // Cyan
+            RgbColor::new(128, 128, 128),    // Gray
+            RgbColor::new(0x44, 0x72, 0xC4), // Excel accent color
+        ];
+
+        for original in colors {
+            let (h, s, l) = original.to_hsl();
+            let converted = RgbColor::from_hsl(h, s, l, original.a);
+            assert_eq!(converted.r, original.r, "Red mismatch for {:?}", original);
+            assert_eq!(converted.g, original.g, "Green mismatch for {:?}", original);
+            assert_eq!(converted.b, original.b, "Blue mismatch for {:?}", original);
+        }
+    }
+
+    #[test]
+    fn test_apply_tint_ecma376_darken() {
+        // Test ECMA-376 darkening formula: L' = L * (1 + tint)
+        // For gray (L=0.5) with tint=-0.5: L' = 0.5 * (1 + (-0.5)) = 0.5 * 0.5 = 0.25
+        let color = RgbColor::new(128, 128, 128);
+        let tinted = color.apply_tint(-0.5);
+
+        // Gray with L=0.25 should be around RGB(64, 64, 64)
+        assert!(
+            tinted.r < 80,
+            "Darkened red should be < 80, got {}",
+            tinted.r
+        );
+        assert!(
+            tinted.g < 80,
+            "Darkened green should be < 80, got {}",
+            tinted.g
+        );
+        assert!(
+            tinted.b < 80,
+            "Darkened blue should be < 80, got {}",
+            tinted.b
+        );
+    }
+
+    #[test]
+    fn test_apply_tint_ecma376_lighten() {
+        // Test ECMA-376 lightening formula: L' = L * (1 - tint) + tint
+        // For gray (L=0.5) with tint=0.5: L' = 0.5 * (1 - 0.5) + 0.5 = 0.5 * 0.5 + 0.5 = 0.75
+        let color = RgbColor::new(128, 128, 128);
+        let tinted = color.apply_tint(0.5);
+
+        // Gray with L=0.75 should be around RGB(191, 191, 191)
+        assert!(
+            tinted.r > 180,
+            "Lightened red should be > 180, got {}",
+            tinted.r
+        );
+        assert!(
+            tinted.g > 180,
+            "Lightened green should be > 180, got {}",
+            tinted.g
+        );
+        assert!(
+            tinted.b > 180,
+            "Lightened blue should be > 180, got {}",
+            tinted.b
+        );
+    }
+
+    #[test]
+    fn test_apply_tint_extreme_darken() {
+        // tint = -1.0 should make the color black (L' = L * 0 = 0)
+        let color = RgbColor::new(255, 128, 64);
+        let tinted = color.apply_tint(-1.0);
+
+        assert_eq!(tinted.r, 0, "Full darken should result in black");
+        assert_eq!(tinted.g, 0, "Full darken should result in black");
+        assert_eq!(tinted.b, 0, "Full darken should result in black");
+    }
+
+    #[test]
+    fn test_apply_tint_extreme_lighten() {
+        // tint = 1.0 should make the color white (L' = L * 0 + 1 = 1)
+        let color = RgbColor::new(255, 128, 64);
+        let tinted = color.apply_tint(1.0);
+
+        assert_eq!(tinted.r, 255, "Full lighten should result in white");
+        assert_eq!(tinted.g, 255, "Full lighten should result in white");
+        assert_eq!(tinted.b, 255, "Full lighten should result in white");
+    }
+
+    #[test]
+    fn test_apply_tint_preserves_hue() {
+        // Tint should only affect lightness, not hue or saturation
+        let color = RgbColor::new(255, 0, 0); // Pure red
+        let tinted = color.apply_tint(0.3);
+
+        // The tinted color should still be reddish (R > G, R > B)
+        assert!(
+            tinted.r > tinted.g,
+            "Red should still be dominant, r={} g={}",
+            tinted.r,
+            tinted.g
+        );
+        assert!(
+            tinted.r > tinted.b,
+            "Red should still be dominant, r={} b={}",
+            tinted.r,
+            tinted.b
+        );
+    }
+
+    #[test]
+    fn test_apply_tint_preserves_alpha() {
+        let color = RgbColor::new_argb(128, 255, 128, 64);
+        let tinted = color.apply_tint(0.5);
+
+        assert_eq!(tinted.a, 128, "Alpha channel should be preserved");
+    }
+
+    #[test]
+    fn test_apply_tint_clamps_out_of_range() {
+        let color = RgbColor::new(128, 128, 128);
+
+        // tint > 1.0 should be clamped to 1.0
+        let tinted_over = color.apply_tint(2.0);
+        let tinted_one = color.apply_tint(1.0);
+        assert_eq!(
+            tinted_over, tinted_one,
+            "tint=2.0 should be clamped to tint=1.0"
+        );
+
+        // tint < -1.0 should be clamped to -1.0
+        let tinted_under = color.apply_tint(-2.0);
+        let tinted_neg_one = color.apply_tint(-1.0);
+        assert_eq!(
+            tinted_under, tinted_neg_one,
+            "tint=-2.0 should be clamped to tint=-1.0"
+        );
+    }
+
+    #[test]
+    fn test_apply_tint_excel_accent_color() {
+        // Test with actual Excel accent1 color (4472C4)
+        // This is a known value that Excel uses
+        let color = RgbColor::from_hex("4472C4").unwrap();
+
+        // Test a common tint value used in Excel (-0.249977111117893)
+        let tinted = color.apply_tint(-0.25);
+
+        // The result should be darker
+        let (_, _, orig_l) = color.to_hsl();
+        let (_, _, new_l) = tinted.to_hsl();
+        assert!(new_l < orig_l, "Negative tint should decrease lightness");
+    }
+
+    #[test]
+    fn test_apply_tint_white_remains_white_on_lighten() {
+        // White (L=1.0) with positive tint should remain white
+        // L' = 1.0 * (1 - tint) + tint = 1.0 - tint + tint = 1.0
+        let color = RgbColor::new(255, 255, 255);
+        let tinted = color.apply_tint(0.5);
+
+        assert_eq!(tinted.r, 255, "White should remain white when lightened");
+        assert_eq!(tinted.g, 255, "White should remain white when lightened");
+        assert_eq!(tinted.b, 255, "White should remain white when lightened");
+    }
+
+    #[test]
+    fn test_apply_tint_black_lightens_correctly() {
+        // Black (L=0.0) with positive tint should become gray
+        // L' = 0.0 * (1 - tint) + tint = tint
+        let color = RgbColor::new(0, 0, 0);
+        let tinted = color.apply_tint(0.5);
+
+        // L'=0.5 for achromatic should give us mid-gray
+        assert!(
+            tinted.r > 100 && tinted.r < 140,
+            "Black with tint=0.5 should be mid-gray, got r={}",
+            tinted.r
+        );
+        assert_eq!(tinted.r, tinted.g, "Should remain achromatic");
+        assert_eq!(tinted.g, tinted.b, "Should remain achromatic");
+    }
+
+    #[test]
+    fn test_parse_empty_theme() {
+        let xml = br#"<?xml version="1.0"?><a:theme name="Test"></a:theme>"#;
+        let theme = Theme::parse(xml);
+        assert_eq!(theme.name, "Test");
+    }
+
+    #[test]
+    fn test_parse_theme_with_color_scheme() {
+        let xml = br#"
+        <a:theme name="Office Theme">
+            <a:themeElements>
+                <a:clrScheme name="Office">
+                    <a:dk1><a:srgbClr val="000000"/></a:dk1>
+                    <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                    <a:accent1><a:srgbClr val="4472C4"/></a:accent1>
+                </a:clrScheme>
+            </a:themeElements>
+        </a:theme>
+        "#;
+
+        let theme = Theme::parse(xml);
+        assert_eq!(theme.name, "Office Theme");
+        assert_eq!(theme.color_scheme.name, "Office");
+
+        // Check canonical color scheme (hex strings via resolve_hex)
+        assert_eq!(theme.color_scheme.resolve_hex(0).as_deref(), Some("000000"));
+        assert_eq!(theme.color_scheme.resolve_hex(1).as_deref(), Some("FFFFFF"));
+        assert_eq!(theme.color_scheme.resolve_hex(4).as_deref(), Some("4472C4"));
+
+        // Check runtime colors (ThemeColor variants)
+        if let Some(ThemeColor::Rgb(rgb)) = &theme.runtime_colors.dk1 {
+            assert_eq!(rgb.r, 0);
+            assert_eq!(rgb.g, 0);
+            assert_eq!(rgb.b, 0);
+        } else {
+            panic!("Expected RGB color for dk1");
+        }
+
+        if let Some(ThemeColor::Rgb(rgb)) = &theme.runtime_colors.accent1 {
+            assert_eq!(rgb.r, 0x44);
+            assert_eq!(rgb.g, 0x72);
+            assert_eq!(rgb.b, 0xC4);
+        } else {
+            panic!("Expected RGB color for accent1");
+        }
+    }
+
+    #[test]
+    fn test_parse_system_color() {
+        let xml = br#"
+        <a:theme name="Test">
+            <a:themeElements>
+                <a:clrScheme name="Test">
+                    <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+                    <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+                </a:clrScheme>
+            </a:themeElements>
+        </a:theme>
+        "#;
+
+        let theme = Theme::parse(xml);
+
+        // Canonical color scheme resolves system colors to hex
+        assert_eq!(theme.color_scheme.resolve_hex(0).as_deref(), Some("000000"));
+        assert_eq!(theme.color_scheme.resolve_hex(1).as_deref(), Some("FFFFFF"));
+
+        // Runtime colors preserve the system color variant
+        if let Some(ThemeColor::System { name, last_color }) = &theme.runtime_colors.dk1 {
+            assert_eq!(name, "windowText");
+            assert_eq!(last_color.unwrap().r, 0);
+            assert_eq!(last_color.unwrap().g, 0);
+            assert_eq!(last_color.unwrap().b, 0);
+        } else {
+            panic!("Expected system color for dk1");
+        }
+    }
+
+    #[test]
+    fn test_theme_resolve_rgb_color() {
+        let theme = Theme::default();
+        let color = ThemeColor::Rgb(RgbColor::new(128, 128, 128));
+        let resolved = theme.resolve_color(&color);
+        assert!(resolved.is_some());
+        assert_eq!(resolved.unwrap().r, 128);
+    }
+
+    #[test]
+    fn test_theme_resolve_indexed_color() {
+        let theme = Theme::default();
+        let color = ThemeColor::Indexed(0); // Black
+        let resolved = theme.resolve_color(&color);
+        assert!(resolved.is_some());
+        assert_eq!(resolved.unwrap().r, 0);
+        assert_eq!(resolved.unwrap().g, 0);
+        assert_eq!(resolved.unwrap().b, 0);
+    }
+
+    #[test]
+    fn test_indexed_color_table() {
+        // Test standard colors
+        assert_eq!(Theme::indexed_color(0), Some(RgbColor::new(0, 0, 0))); // Black
+        assert_eq!(Theme::indexed_color(1), Some(RgbColor::new(255, 255, 255))); // White
+        assert_eq!(Theme::indexed_color(2), Some(RgbColor::new(255, 0, 0))); // Red
+        assert_eq!(Theme::indexed_color(3), Some(RgbColor::new(0, 255, 0))); // Green
+        assert_eq!(Theme::indexed_color(4), Some(RgbColor::new(0, 0, 255))); // Blue
+
+        // Test out of range
+        assert_eq!(Theme::indexed_color(100), None);
+    }
+
+    #[test]
+    fn test_parse_theme_name_decodes_xml_entities() {
+        let xml = br#"<a:theme name="A&amp;B Theme"><a:themeElements/></a:theme>"#;
+        let theme = Theme::parse(xml);
+        assert_eq!(theme.name, "A&B Theme");
+    }
+
+    #[test]
+    fn test_parse_preserves_root_siblings_after_theme_elements() {
+        let xml = br#"
+        <a:theme name="Test">
+            <a:themeElements></a:themeElements>
+            <a:objectDefaults><a:spDef><a:spPr/></a:spDef></a:objectDefaults>
+            <a:extraClrSchemeLst><a:extraClrScheme name="Extra"/></a:extraClrSchemeLst>
+            <a:extLst><a:ext uri="{test}"><a16:creationId id="1"/></a:ext></a:extLst>
+        </a:theme>
+        "#;
+
+        let theme = Theme::parse(xml);
+        assert_eq!(
+            theme.object_defaults_xml.as_deref(),
+            Some(br#"<a:spDef><a:spPr/></a:spDef>"#.as_slice())
+        );
+        assert_eq!(
+            theme.extra_clr_scheme_lst_xml.as_deref(),
+            Some(br#"<a:extraClrScheme name="Extra"/>"#.as_slice())
+        );
+        assert_eq!(
+            theme.ext_lst_xml.as_deref(),
+            Some(
+                br#"<a:extLst><a:ext uri="{test}"><a16:creationId id="1"/></a:ext></a:extLst>"#
+                    .as_slice()
+            )
+        );
+        assert_eq!(
+            theme.root_sibling_order.as_deref(),
+            Some(
+                [
+                    "objectDefaults".to_string(),
+                    "extraClrSchemeLst".to_string(),
+                    "extLst".to_string()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_preserves_self_closing_root_siblings_as_empty_present() {
+        let xml = br#"
+        <a:theme name="Test">
+            <a:themeElements></a:themeElements>
+            <a:objectDefaults/>
+            <a:extraClrSchemeLst/>
+            <a:custClrLst/>
+            <a:extLst/>
+        </a:theme>
+        "#;
+
+        let theme = Theme::parse(xml);
+        assert_eq!(theme.object_defaults_xml.as_deref(), Some(b"".as_slice()));
+        assert_eq!(
+            theme.extra_clr_scheme_lst_xml.as_deref(),
+            Some(b"".as_slice())
+        );
+        assert_eq!(
+            theme.cust_clr_lst_xml.as_deref(),
+            Some(br#"<a:custClrLst/>"#.as_slice())
+        );
+        assert_eq!(
+            theme.ext_lst_xml.as_deref(),
+            Some(br#"<a:extLst/>"#.as_slice())
+        );
+        assert_eq!(
+            theme.root_sibling_order.as_deref(),
+            Some(
+                [
+                    "objectDefaults".to_string(),
+                    "extraClrSchemeLst".to_string(),
+                    "custClrLst".to_string(),
+                    "extLst".to_string()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_preserves_explicit_empty_root_siblings_as_empty_present() {
+        let xml = br#"
+        <a:theme name="Test">
+            <a:themeElements></a:themeElements>
+            <a:objectDefaults></a:objectDefaults>
+            <a:extraClrSchemeLst></a:extraClrSchemeLst>
+        </a:theme>
+        "#;
+
+        let theme = Theme::parse(xml);
+        assert_eq!(theme.object_defaults_xml.as_deref(), Some(b"".as_slice()));
+        assert_eq!(
+            theme.extra_clr_scheme_lst_xml.as_deref(),
+            Some(b"".as_slice())
+        );
+        assert_eq!(
+            theme.root_sibling_order.as_deref(),
+            Some(
+                [
+                    "objectDefaults".to_string(),
+                    "extraClrSchemeLst".to_string()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_root_siblings_ignores_nested_matches_after_theme_elements() {
+        let xml = br#"
+        <a:theme name="Test">
+            <a:themeElements></a:themeElements>
+            <a:extLst>
+                <a:ext uri="{test}">
+                    <a:objectDefaults/>
+                    <a:extraClrSchemeLst/>
+                    <a:custClrLst/>
+                </a:ext>
+            </a:extLst>
+        </a:theme>
+        "#;
+
+        let theme = Theme::parse(xml);
+        assert!(theme.object_defaults_xml.is_none());
+        assert!(theme.extra_clr_scheme_lst_xml.is_none());
+        assert!(theme.cust_clr_lst_xml.is_none());
+        assert!(theme.ext_lst_xml.is_some());
+        assert_eq!(
+            theme.root_sibling_order.as_deref(),
+            Some(["extLst".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn test_theme_resolve_system_without_last_color_returns_none() {
+        let theme = Theme::default();
+        let color = ThemeColor::System {
+            name: "windowText".to_string(),
+            last_color: None,
+        };
+
+        assert_eq!(theme.resolve_color(&color), None);
+    }
+
+    #[test]
+    fn test_theme_resolve_unset_runtime_color_returns_none() {
+        let theme = Theme::default();
+        let color = ThemeColor::Theme {
+            index: 4,
+            tint: None,
+        };
+
+        assert_eq!(theme.resolve_color(&color), None);
+    }
+
+    #[test]
+    fn test_indexed_color_system_entries() {
+        assert_eq!(Theme::indexed_color(64), Some(RgbColor::new(0, 0, 0)));
+        assert_eq!(Theme::indexed_color(65), Some(RgbColor::new(255, 255, 255)));
+        assert_eq!(Theme::indexed_color(66), None);
     }
 }

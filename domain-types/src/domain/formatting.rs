@@ -3,16 +3,16 @@
 //! Pure data contracts for cell metadata and properties.
 //! `CellFormat` itself lives in `crate::cell_format`.
 
-use crate::CellFormat;
+use crate::{CellFormat, FormulaCacheProvenance};
 use serde::{Deserialize, Serialize};
 
 /// Cell metadata (non-format properties: provenance, validation, etc.)
 ///
 /// The metadata block carries both editorial provenance (provenance /
 /// validation / connection_id) and XLSX round-trip bookkeeping fields
-/// required to reconstruct the original workbook (style palette index,
-/// cellMeta flag, valueMeta index, formula-result type, SST index,
-/// original value). Typed OOXML preservation: eliminated the `extra: HashMap<String,
+/// required to reconstruct modeled workbook state (style palette index,
+/// cellMeta flag, valueMeta index, formula-result type, import-only SST
+/// provenance, original value). Typed OOXML preservation: eliminated the `extra: HashMap<String,
 /// serde_json::Value>` escape hatch; every former bag key is now a
 /// typed named field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -33,10 +33,10 @@ pub struct CellMetadata {
     /// inline `CellFormat` and drop this index.
     #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
     pub style_id: Option<u32>,
-    /// Cell-metadata-record flag (`<c cm="1">`). Paired with an entry
-    /// in `metadata.xml`'s cellMetadata block, addressed by row/col.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub cm: bool,
+    /// Cell-metadata-record index (`<c cm="N">`). Paired with an entry
+    /// in `metadata.xml`'s cellMetadata block.
+    #[serde(rename = "cm", skip_serializing_if = "Option::is_none")]
+    pub cell_metadata_index: Option<u32>,
     /// Value-metadata-record index (`<c vm="N">`). Paired with entry
     /// `N` in `metadata.xml`'s valueMetadata block.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,9 +47,26 @@ pub struct CellMetadata {
     /// number ambiguity on formulas).
     #[serde(rename = "formulaResultType", skip_serializing_if = "Option::is_none")]
     pub formula_result_type: Option<u8>,
-    /// Original shared-string-table index for `t="s"` cells. Preserves
-    /// SST ordering on write even when the cached value has been
-    /// recomputed.
+    /// Whether an imported formula cell had an explicit empty cached
+    /// value element (`<v/>`). This is metadata for XLSX serialization,
+    /// not a computed result.
+    #[serde(
+        rename = "hasEmptyCachedValue",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub has_empty_cached_value: bool,
+    /// Formula-cache metadata owner. Missing/empty means absent or unknown
+    /// provenance and must not authorize cache-only OOXML replay.
+    #[serde(
+        rename = "formulaCacheProvenance",
+        default,
+        skip_serializing_if = "FormulaCacheProvenance::is_absent_or_unknown"
+    )]
+    pub formula_cache_provenance: FormulaCacheProvenance,
+    /// Original shared-string-table index for imported `t="s"` cells.
+    /// Import provenance only; XLSX export derives shared-string indices from
+    /// current cell values and must not use this field as SST identity.
     #[serde(rename = "sstIndex", skip_serializing_if = "Option::is_none")]
     pub original_sst_index: Option<u32>,
     /// Original `<v>` text preserved verbatim to survive float-
@@ -92,15 +109,36 @@ pub struct CellProperties {
     /// XLSX style palette index. See [`CellMetadata::style_id`].
     #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
     pub style_id: Option<u32>,
-    /// Cell-metadata-record flag. See [`CellMetadata::cm`].
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub cm: bool,
+    /// Cell-metadata-record index. See [`CellMetadata::cell_metadata_index`].
+    #[serde(rename = "cm", skip_serializing_if = "Option::is_none")]
+    pub cell_metadata_index: Option<u32>,
     /// Value-metadata-record index. See [`CellMetadata::vm`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vm: Option<u32>,
+    /// Cell-level phonetic display flag (`ph`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub phonetic: bool,
+    /// Original lexical value for OOXML date cells (`t="d"`).
+    #[serde(rename = "dateLexicalValue", skip_serializing_if = "Option::is_none")]
+    pub date_lexical_value: Option<String>,
     /// Formula-result type code. See [`CellMetadata::formula_result_type`].
     #[serde(rename = "formulaResultType", skip_serializing_if = "Option::is_none")]
     pub formula_result_type: Option<u8>,
+    /// Explicit empty formula cached value marker. See
+    /// [`CellMetadata::has_empty_cached_value`].
+    #[serde(
+        rename = "hasEmptyCachedValue",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub has_empty_cached_value: bool,
+    /// Formula-cache metadata owner. See [`CellMetadata::formula_cache_provenance`].
+    #[serde(
+        rename = "formulaCacheProvenance",
+        default,
+        skip_serializing_if = "FormulaCacheProvenance::is_absent_or_unknown"
+    )]
+    pub formula_cache_provenance: FormulaCacheProvenance,
     /// Original SST index. See [`CellMetadata::original_sst_index`].
     #[serde(rename = "sstIndex", skip_serializing_if = "Option::is_none")]
     pub original_sst_index: Option<u32>,
@@ -127,9 +165,13 @@ impl CellProperties {
             && self.validation.is_none()
             && self.connection_id.is_none()
             && self.style_id.is_none()
-            && !self.cm
+            && self.cell_metadata_index.is_none()
             && self.vm.is_none()
+            && !self.phonetic
+            && self.date_lexical_value.is_none()
             && self.formula_result_type.is_none()
+            && !self.has_empty_cached_value
+            && self.formula_cache_provenance.is_absent_or_unknown()
             && self.original_sst_index.is_none()
             && self.original_value.is_none()
             && !self.is_array_formula
@@ -144,9 +186,11 @@ impl CellMetadata {
             && self.validation.is_none()
             && self.connection_id.is_none()
             && self.style_id.is_none()
-            && !self.cm
+            && self.cell_metadata_index.is_none()
             && self.vm.is_none()
             && self.formula_result_type.is_none()
+            && !self.has_empty_cached_value
+            && self.formula_cache_provenance.is_absent_or_unknown()
             && self.original_sst_index.is_none()
             && self.original_value.is_none()
             && !self.is_array_formula

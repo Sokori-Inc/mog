@@ -29,11 +29,10 @@ pub fn parse_color_scale(xml: &[u8]) -> ColorScale {
     let mut colors = Vec::new();
     let mut pos = 0;
 
-    // Parse all cfvo elements
+    // Parse all cfvo elements. Use the full element so x14 thresholds that
+    // carry their value as a child <xm:f> can be preserved.
     while let Some(cfvo_start) = find_tag_simd(xml, b"cfvo", pos) {
-        let cfvo_end = find_gt_simd(xml, cfvo_start)
-            .map(|p| p + 1)
-            .unwrap_or(xml.len());
+        let cfvo_end = cfvo_element_end(xml, cfvo_start);
         let cfvo_xml = &xml[cfvo_start..cfvo_end];
         cfvos.push(parse_cfvo(cfvo_xml));
         pos = cfvo_end;
@@ -123,12 +122,11 @@ pub fn parse_data_bar(xml: &[u8]) -> DataBar {
         data_bar.axis_position = axis_position_from_bytes(axis);
     }
 
-    // Parse CFVO elements
+    // Parse CFVO elements. Use the full element so x14 thresholds that carry
+    // their value as a child <xm:f> can be preserved.
     let mut pos = 0;
     while let Some(cfvo_start) = find_tag_simd(xml, b"cfvo", pos) {
-        let cfvo_end = find_gt_simd(xml, cfvo_start)
-            .map(|p| p + 1)
-            .unwrap_or(xml.len());
+        let cfvo_end = cfvo_element_end(xml, cfvo_start);
         let cfvo_xml = &xml[cfvo_start..cfvo_end];
         data_bar.cfvo.push(parse_cfvo(cfvo_xml));
         pos = cfvo_end;
@@ -228,6 +226,7 @@ pub fn parse_icon_set(xml: &[u8]) -> IconSet {
 
     // Parse percent
     if let Some(p_pos) = find_attr_simd(xml, b"percent=\"", 0) {
+        icon_set.percent_attr_present = true;
         let value_start = p_pos + 9;
         if let Some((start, end)) = extract_quoted_value(xml, value_start) {
             let val = &xml[start..end];
@@ -245,12 +244,11 @@ pub fn parse_icon_set(xml: &[u8]) -> IconSet {
         icon_set.custom = true;
     }
 
-    // Parse CFVO elements
+    // Parse CFVO elements. Use the full element so x14 thresholds that carry
+    // their value as a child <xm:f> can be preserved.
     let mut pos = 0;
     while let Some(cfvo_start) = find_tag_simd(xml, b"cfvo", pos) {
-        let cfvo_end = find_gt_simd(xml, cfvo_start)
-            .map(|p| p + 1)
-            .unwrap_or(xml.len());
+        let cfvo_end = cfvo_element_end(xml, cfvo_start);
         let cfvo_xml = &xml[cfvo_start..cfvo_end];
         icon_set.cfvo.push(parse_cfvo(cfvo_xml));
         pos = cfvo_end;
@@ -268,6 +266,18 @@ pub fn parse_icon_set(xml: &[u8]) -> IconSet {
     }
 
     icon_set
+}
+
+fn cfvo_element_end(xml: &[u8], cfvo_start: usize) -> usize {
+    let Some(open_end) = find_gt_simd(xml, cfvo_start) else {
+        return xml.len();
+    };
+    if open_end > cfvo_start && xml.get(open_end.saturating_sub(1)) == Some(&b'/') {
+        return open_end + 1;
+    }
+    find_closing_tag(xml, b"cfvo", open_end)
+        .and_then(|close_start| find_gt_simd(xml, close_start).map(|end| end + 1))
+        .unwrap_or(open_end + 1)
 }
 
 // =============================================================================
@@ -458,9 +468,21 @@ pub fn parse_cf_rule_x14(xml: &[u8]) -> CfRuleX14 {
         rule.priority = priority;
     }
 
+    // Parse dxfId attribute
+    if let Some(dxf_id) = parse_u32_attr(xml, b"dxfId=\"") {
+        rule.dxf_id = Some(dxf_id);
+    }
+
     // Parse id attribute
     if let Some(id) = parse_string_attr(xml, b"id=\"") {
         rule.id = id;
+    }
+
+    // Parse colorScale element
+    if let Some(cs_start) = find_tag_simd(xml, b"colorScale", 0) {
+        let cs_end = find_closing_tag(xml, b"colorScale", cs_start).unwrap_or(xml.len());
+        let cs_xml = &xml[cs_start..cs_end];
+        rule.color_scale = Some(parse_color_scale(cs_xml));
     }
 
     // Parse dataBar element

@@ -5,7 +5,7 @@
  * 1. Import data (Get Data button with dropdown)
  * 2. Sort & Filter (Sort, Filter, Clear, Reapply, Advanced)
  * 3. Data Tools (Text to Cols, Flash Fill, Remove Dups, Validation, Consolidate)
- * 4. Forecast (Scenarios stub)
+ * 4. Forecast
  * 5. Outline (Group, Ungroup, Show, Hide, Subtotal)
  *
  * Row/Column Grouping
@@ -14,9 +14,14 @@
  * Uses RibbonButton for consistent button styling (single source of truth).
  */
 
-import { useCallback, useEffect } from 'react';
-import { useUIStore } from '../../../internal-api';
-import { useSpreadsheetHostCommandsOptional } from '../../../infra/context';
+import { useCallback, useEffect, useState } from 'react';
+import { useActiveCell, useUIStore } from '../../../internal-api';
+import { parseCSV } from '../../../domain/clipboard/clipboard-parser';
+import {
+  useActiveSheetId,
+  useSpreadsheetHostCommandsOptional,
+  useWorkbook,
+} from '../../../infra/context';
 
 import {
   DropdownMenu,
@@ -47,6 +52,7 @@ import {
   DataValidationIcon,
   FilterIcon,
   FlashFillIcon,
+  ForecastSheetIcon,
   GetDataIcon,
   GroupIcon,
   HideDetailIcon,
@@ -60,6 +66,81 @@ import {
   TextToColumnsIcon,
   UngroupIcon,
 } from '../primitives/ToolbarIcons';
+
+type JsonRow = Record<string, unknown>;
+type JsonCellValue = string | number | boolean | null;
+type JsonCellUpdate = { row: number; col: number; value: JsonCellValue };
+type CsvCellUpdate = { row: number; col: number; value: string };
+
+function isPlainObject(value: unknown): value is JsonRow {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function flattenJsonValue(value: unknown, prefix = '', out: JsonRow = {}): JsonRow {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      flattenJsonValue(item, prefix ? `${prefix}.${index}` : `${index}`, out),
+    );
+    return out;
+  }
+  if (isPlainObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      flattenJsonValue(child, prefix ? `${prefix}.${key}` : key, out);
+    }
+    return out;
+  }
+  out[prefix || 'value'] = value;
+  return out;
+}
+
+function jsonToRows(value: unknown): { headers: string[]; rows: JsonRow[] } {
+  const rows = (Array.isArray(value) ? value : [value]).map((item) => flattenJsonValue(item));
+  // Stable table contract: nested keys use dot paths, array indexes are path segments,
+  // headers are sorted, and missing fields are written as blank cells.
+  const headers = Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).sort();
+  return { headers: headers.length > 0 ? headers : ['value'], rows };
+}
+
+function cellValueFromJson(value: unknown): string | number | boolean | null {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+function jsonToCellUpdates(value: unknown, startRow: number, startCol: number): JsonCellUpdate[] {
+  const { headers, rows } = jsonToRows(value);
+  const updates: JsonCellUpdate[] = headers.map((header, colOffset) => ({
+    row: startRow,
+    col: startCol + colOffset,
+    value: header,
+  }));
+
+  rows.forEach((row, rowIndex) => {
+    headers.forEach((header, colOffset) => {
+      updates.push({
+        row: startRow + rowIndex + 1,
+        col: startCol + colOffset,
+        value: cellValueFromJson(row[header]),
+      });
+    });
+  });
+
+  return updates;
+}
+
+function stripUtf8Bom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function csvToCellUpdates(text: string): CsvCellUpdate[] {
+  return parseCSV(stripUtf8Bom(text)).flatMap((row, rowIndex) =>
+    row.map((value, colIndex) => ({ row: rowIndex, col: colIndex, value })),
+  );
+}
 
 // =============================================================================
 // Inline Icons for Get Data dropdown
@@ -146,12 +227,16 @@ export function DataRibbon({
   onImportJson,
   onImportFromWeb,
 }: DataRibbonProps) {
-  const { canGroup, canUngroup, canShowDetail, canHideDetail } = useGroupingActions();
+  const { groupRows, groupColumns, canGroup, canUngroup, canShowDetail, canHideDetail } =
+    useGroupingActions();
   const { canClearFilters, canReapplyFilters } = useFilterActions();
 
   // Get dispatch for action handling
   const dispatch = useDispatch();
   const hostCommands = useSpreadsheetHostCommandsOptional();
+  const workbook = useWorkbook();
+  const activeSheetId = useActiveSheetId();
+  const { row: activeRow, col: activeCol } = useActiveCell();
 
   // F1: Validation circles state
   const validationCirclesVisible = useUIStore((s) => s.validationCirclesVisible);
@@ -199,13 +284,17 @@ export function DataRibbon({
         if (onImportCsv) {
           onImportCsv(file);
         } else {
-          // Default behavior: log for now (parent component should handle)
-          console.log('CSV file selected:', file.name);
+          void file.text().then(async (text) => {
+            const updates = csvToCellUpdates(text);
+            if (updates.length > 0) {
+              await workbook.getSheetById(activeSheetId).setCells(updates);
+            }
+          });
         }
       }
     };
     input.click();
-  }, [hostCommands, onImportCsv, setIsGetDataDropdownOpen]);
+  }, [activeSheetId, hostCommands, onImportCsv, setIsGetDataDropdownOpen, workbook]);
 
   const handleImportJson = useCallback(() => {
     setIsGetDataDropdownOpen(false);
@@ -227,13 +316,27 @@ export function DataRibbon({
         if (onImportJson) {
           onImportJson(file);
         } else {
-          // Default behavior: log for now (parent component should handle)
-          console.log('JSON file selected:', file.name);
+          void file.text().then(async (text) => {
+            const parsed = JSON.parse(text);
+            const updates = jsonToCellUpdates(parsed, activeRow, activeCol);
+            const ws = workbook.getSheetById(activeSheetId);
+            if (updates.length > 0) {
+              await ws.setCells(updates);
+            }
+          });
         }
       }
     };
     input.click();
-  }, [hostCommands, onImportJson, setIsGetDataDropdownOpen]);
+  }, [
+    activeCol,
+    activeRow,
+    activeSheetId,
+    hostCommands,
+    onImportJson,
+    setIsGetDataDropdownOpen,
+    workbook,
+  ]);
 
   const handleImportFromWeb = useCallback(() => {
     setIsGetDataDropdownOpen(false);
@@ -249,6 +352,24 @@ export function DataRibbon({
       onImportFromWeb();
     }
   }, [hostCommands, onImportFromWeb, setIsGetDataDropdownOpen]);
+
+  const [isGroupDropdownOpen, setIsGroupDropdownOpen] = useState(false);
+  const handleGroupClick = useCallback(() => {
+    if (!canGroup) return;
+    setIsGroupDropdownOpen((open) => !open);
+  }, [canGroup]);
+  const handleGroupRows = useCallback(() => {
+    setIsGroupDropdownOpen(false);
+    groupRows();
+  }, [groupRows]);
+  const handleGroupColumns = useCallback(() => {
+    setIsGroupDropdownOpen(false);
+    groupColumns();
+  }, [groupColumns]);
+
+  useEffect(() => {
+    if (!canGroup) setIsGroupDropdownOpen(false);
+  }, [canGroup]);
 
   // ===========================================================================
   // KeyTip Registration (display-only — keytip overlay reads `key`,
@@ -490,6 +611,7 @@ export function DataRibbon({
             onClick={handleTextToColumns}
             title="Text to Columns"
             aria-label="Text to Columns"
+            visibilityKey="textToColumns"
           />
           <RibbonButton
             layout="vertical"
@@ -510,6 +632,7 @@ export function DataRibbon({
             onClick={handleRemoveDuplicates}
             title="Remove Duplicates"
             aria-label="Remove Duplicates"
+            visibilityKey="removeDuplicates"
           />
           <RibbonButton
             id="data-validation"
@@ -522,6 +645,7 @@ export function DataRibbon({
             disabled={!onDataValidation}
             title={onDataValidation ? 'Data Validation' : 'Data Validation (coming soon)'}
             aria-label="Data Validation"
+            visibilityKey="dataValidation"
           />
           <RibbonButton
             layout="vertical"
@@ -539,6 +663,7 @@ export function DataRibbon({
             aria-label={
               validationCirclesVisible ? 'Clear Validation Circles' : 'Circle Invalid Data'
             }
+            visibilityKey={validationCirclesVisible ? 'clearCircles' : 'circleInvalid'}
           />
           <RibbonButton
             layout="vertical"
@@ -553,13 +678,24 @@ export function DataRibbon({
         </div>
       </ToolbarGroup>
 
-      {/* 4. Forecast Group (Scenarios) */}
+      {/* 4. Forecast Group */}
       <ToolbarGroup
         label="Forecast"
         collapseConfig={FORECAST_COLLAPSE_CONFIG}
-        dropdownIcon={<SettingsIcon />}
+        dropdownIcon={<ForecastSheetIcon />}
       >
         <div className="flex items-center gap-[var(--ribbon-group-items-gap)]">
+          <RibbonButton
+            id="data-forecast-sheet"
+            layout="vertical"
+            height="full"
+            width="narrow"
+            icon={<ForecastSheetIcon />}
+            label="Forecast Sheet"
+            onClick={() => dispatch('OPEN_FORECAST_SHEET_DIALOG')}
+            title="Forecast Sheet"
+            aria-label="Forecast Sheet"
+          />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <RibbonButton
@@ -572,6 +708,7 @@ export function DataRibbon({
                 hasDropdown
                 title="Scenario tools (Alt+A, W)"
                 aria-label={PRODUCT_VOCABULARY.scenarios.label}
+                visibilityKey="whatIfAnalysis"
               />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
@@ -606,18 +743,44 @@ export function DataRibbon({
         dropdownIcon={<GroupIcon />}
       >
         <div className="flex items-center gap-[var(--ribbon-group-items-gap)]">
-          <RibbonButton
-            id="data-group"
-            layout="vertical"
-            height="full"
-            width="narrow"
-            icon={<GroupIcon />}
-            label="Group"
-            onClick={() => dispatch('GROUP')}
-            disabled={!canGroup}
-            title="Group selected rows (Alt+Shift+Right)"
-            aria-label="Group"
-          />
+          <div className="relative inline-flex">
+            <RibbonButton
+              id="data-group"
+              layout="vertical"
+              height="full"
+              width="narrow"
+              icon={<GroupIcon />}
+              label="Group"
+              onClick={handleGroupClick}
+              disabled={!canGroup}
+              isOpen={isGroupDropdownOpen}
+              title="Group selected rows or columns"
+              aria-label="Group"
+              aria-expanded={isGroupDropdownOpen}
+              aria-haspopup="menu"
+            />
+            <RibbonDropdownPanel
+              open={isGroupDropdownOpen}
+              onClose={() => setIsGroupDropdownOpen(false)}
+            >
+              <div
+                className="bg-ss-surface rounded shadow-ss-md border border-ss-border min-w-[120px] py-1"
+                role="menu"
+                aria-label="Group rows or columns"
+              >
+                <RibbonDropdownItem dataValue="rows" icon={<GroupIcon />} onClick={handleGroupRows}>
+                  Rows
+                </RibbonDropdownItem>
+                <RibbonDropdownItem
+                  dataValue="columns"
+                  icon={<GroupIcon />}
+                  onClick={handleGroupColumns}
+                >
+                  Columns
+                </RibbonDropdownItem>
+              </div>
+            </RibbonDropdownPanel>
+          </div>
           <RibbonButton
             id="data-ungroup"
             layout="vertical"
@@ -645,6 +808,7 @@ export function DataRibbon({
                 : 'Show Detail (no collapsed groups)'
             }
             aria-label="Show Detail"
+            visibilityKey="showDetail"
           />
           <RibbonButton
             id="data-hide-detail"
@@ -661,6 +825,7 @@ export function DataRibbon({
                 : 'Hide Detail (no expanded groups)'
             }
             aria-label="Hide Detail"
+            visibilityKey="hideDetail"
           />
           <RibbonButton
             id="data-subtotal"
@@ -672,6 +837,7 @@ export function DataRibbon({
             onClick={handleSubtotals}
             title="Subtotals - Create subtotals with grouping"
             aria-label="Subtotals"
+            visibilityKey="subtotals"
           />
         </div>
       </ToolbarGroup>

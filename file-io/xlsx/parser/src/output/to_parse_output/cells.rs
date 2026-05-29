@@ -2,14 +2,17 @@
 
 use std::sync::Arc;
 
-use domain_types::{CellData, ImportedCellProjectionRole};
+use domain_types::{
+    CellData, FormulaCacheProvenance, FormulaCacheState, FormulaCachedValuePresence,
+    ImportedCellProjectionRole,
+};
 use value_types::{CellError, CellValue};
 
 use crate::output::results::{
-    CELL_TYPE_VAL_BOOL as CELL_TYPE_BOOL, CELL_TYPE_VAL_EMPTY as CELL_TYPE_EMPTY,
-    CELL_TYPE_VAL_ERROR as CELL_TYPE_ERROR, CELL_TYPE_VAL_FORMULA as CELL_TYPE_FORMULA,
-    CELL_TYPE_VAL_NUMBER as CELL_TYPE_NUMBER, CELL_TYPE_VAL_STRING as CELL_TYPE_STRING,
-    FullCellData,
+    CELL_TYPE_VAL_BOOL as CELL_TYPE_BOOL, CELL_TYPE_VAL_DATE as CELL_TYPE_DATE,
+    CELL_TYPE_VAL_EMPTY as CELL_TYPE_EMPTY, CELL_TYPE_VAL_ERROR as CELL_TYPE_ERROR,
+    CELL_TYPE_VAL_FORMULA as CELL_TYPE_FORMULA, CELL_TYPE_VAL_NUMBER as CELL_TYPE_NUMBER,
+    CELL_TYPE_VAL_STRING as CELL_TYPE_STRING, FullCellData,
 };
 
 // Cell type constants for cached formula values
@@ -97,17 +100,23 @@ fn range_source_position(range: &(u32, u32, u32, u32)) -> (u32, u32) {
 pub(super) fn classify_projection_role(
     cell: &FullCellData,
     spill_ranges: &[(u32, u32, u32, u32)],
+    metadata: Option<&crate::output::results::MetadataOutput>,
 ) -> ImportedCellProjectionRole {
+    let has_dynamic_array_metadata = cell
+        .cell_metadata_index
+        .is_some_and(|cm| metadata.is_some_and(|m| cell_metadata_is_dynamic_array(m, cm)));
+
     if cell.formula.is_some() {
-        if cell.cm && cell.array_ref.is_some() {
+        if has_dynamic_array_metadata && cell.array_ref.is_some() {
             return ImportedCellProjectionRole::DynamicArraySource;
         }
         return ImportedCellProjectionRole::Normal;
     }
 
-    if cell.cm {
+    if cell.cell_metadata_index.is_some() {
         for range in spill_ranges {
-            if cell_in_range(cell.row, cell.col, range)
+            if has_dynamic_array_metadata
+                && cell_in_range(cell.row, cell.col, range)
                 && (cell.row, cell.col) != range_source_position(range)
             {
                 return ImportedCellProjectionRole::DynamicArraySpillTarget;
@@ -121,16 +130,43 @@ pub(super) fn classify_projection_role(
 
 pub(super) fn build_projection_roles(
     cells: &[FullCellData],
+    metadata: Option<&crate::output::results::MetadataOutput>,
 ) -> std::collections::HashMap<(u32, u32), ImportedCellProjectionRole> {
     let spill_ranges = collect_spill_ranges(cells);
     let mut roles = std::collections::HashMap::new();
     for cell in cells {
-        let role = classify_projection_role(cell, &spill_ranges);
+        let role = classify_projection_role(cell, &spill_ranges, metadata);
         if role != ImportedCellProjectionRole::Normal {
             roles.insert((cell.row, cell.col), role);
         }
     }
     roles
+}
+
+fn cell_metadata_is_dynamic_array(
+    metadata: &crate::output::results::MetadataOutput,
+    cm_index: u32,
+) -> bool {
+    let Some(block_index) = cm_index.checked_sub(1).map(|idx| idx as usize) else {
+        return false;
+    };
+    let Some(block) = metadata.cell_metadata.get(block_index) else {
+        return false;
+    };
+
+    block.records.iter().any(|record| {
+        let Some(type_index) = record.t.checked_sub(1).map(|idx| idx as usize) else {
+            return false;
+        };
+        metadata
+            .metadata_types
+            .get(type_index)
+            .is_some_and(|metadata_type| metadata_type.name.eq_ignore_ascii_case("XLDAPR"))
+            || metadata
+                .future_metadata
+                .get(type_index)
+                .is_some_and(|group| group.name.eq_ignore_ascii_case("XLDAPR"))
+    })
 }
 
 // =============================================================================
@@ -152,6 +188,8 @@ pub(super) fn convert_cell_with_projection_role(
     convert_cell_with_projection_role_and_provenance(
         cell,
         shared_strings,
+        &[],
+        &[],
         projection_role,
         None,
         false,
@@ -162,6 +200,8 @@ pub(super) fn convert_cell_with_projection_role(
 pub(super) fn convert_cell_with_projection_role_and_provenance(
     cell: &FullCellData,
     shared_strings: &[String],
+    shared_strings_rich_runs: &[Option<Vec<domain_types::RichTextRun>>],
+    shared_strings_phonetic_xml: &[Option<Vec<u8>>],
     projection_role: ImportedCellProjectionRole,
     sst_compaction: Option<&SharedStringProvenanceCompaction>,
     compact_numeric_provenance: bool,
@@ -195,6 +235,7 @@ pub(super) fn convert_cell_with_projection_role_and_provenance(
         (is_formula || cell.formula.is_some() || cell.cell_formula.is_some())
             && cell.value.as_ref().map_or(false, |v| v.is_empty())
             && cell.cached_value_type == 0;
+    let is_formula_cell = is_formula || cell.formula.is_some() || cell.cell_formula.is_some();
 
     let can_drop_sst_provenance = cell
         .sst_index
@@ -215,6 +256,12 @@ pub(super) fn convert_cell_with_projection_role_and_provenance(
         row: cell.row,
         col: cell.col,
         value,
+        rich_string: rich_string_for_cell(
+            cell,
+            shared_strings,
+            shared_strings_rich_runs,
+            shared_strings_phonetic_xml,
+        ),
         formula,
         array_ref: cell.array_ref.clone(),
         style_id: if cell.style_idx > 0 || cell.has_explicit_style {
@@ -223,14 +270,22 @@ pub(super) fn convert_cell_with_projection_role_and_provenance(
             None
         },
         cell_formula: cell.cell_formula.clone(),
-        cm: cell.cm,
+        cell_metadata_index: cell.cell_metadata_index,
         formula_result_type: if has_effective_formula_result_type {
             Some(cell.cached_value_type)
         } else {
             None
         },
         has_empty_cached_value,
+        formula_cache_provenance: formula_cache_provenance(
+            cell,
+            is_formula_cell,
+            has_empty_cached_value,
+            has_effective_formula_result_type,
+        ),
         vm: cell.vm,
+        phonetic: cell.phonetic,
+        date_lexical_value: cell.date_lexical_value.clone(),
         original_sst_index: if can_drop_sst_provenance {
             None
         } else {
@@ -243,6 +298,78 @@ pub(super) fn convert_cell_with_projection_role_and_provenance(
         },
         projection_role,
     }
+}
+
+fn formula_cache_provenance(
+    cell: &FullCellData,
+    is_formula_cell: bool,
+    has_empty_cached_value: bool,
+    has_effective_formula_result_type: bool,
+) -> FormulaCacheProvenance {
+    if !is_formula_cell {
+        return FormulaCacheProvenance::default();
+    }
+
+    let cached_value_presence = if has_empty_cached_value {
+        FormulaCachedValuePresence::ExplicitEmpty
+    } else if cell.value.as_ref().is_some_and(|value| !value.is_empty()) {
+        FormulaCachedValuePresence::NonEmpty
+    } else {
+        FormulaCachedValuePresence::Absent
+    };
+    let cached_value_kind = has_effective_formula_result_type.then_some(cell.cached_value_type);
+
+    if !cell.force_recalc
+        && cached_value_kind.is_none()
+        && cached_value_presence.is_absent()
+        && cell.value.is_none()
+    {
+        return FormulaCacheProvenance::default();
+    }
+
+    FormulaCacheProvenance {
+        state: FormulaCacheState::ImportedCurrent,
+        force_recalc: cell.force_recalc,
+        cached_value_kind,
+        cached_value_presence,
+        cached_value_lexeme: cell.value.clone(),
+        formula_identity_fingerprint: cell.formula.clone(),
+        ..Default::default()
+    }
+}
+
+fn rich_string_for_cell(
+    cell: &FullCellData,
+    shared_strings: &[String],
+    shared_strings_rich_runs: &[Option<Vec<domain_types::RichTextRun>>],
+    shared_strings_phonetic_xml: &[Option<Vec<u8>>],
+) -> Option<domain_types::RichSharedString> {
+    if cell.cell_type != CELL_TYPE_STRING {
+        return None;
+    }
+    let index = cell.sst_index? as usize;
+    let plain_text = shared_strings.get(index)?.clone();
+    let runs = shared_strings_rich_runs
+        .get(index)
+        .and_then(Clone::clone)
+        .unwrap_or_default();
+    let phonetic_xml = shared_strings_phonetic_xml
+        .get(index)
+        .and_then(Clone::clone);
+    if runs.is_empty() && phonetic_xml.is_none() {
+        return None;
+    }
+    let (phonetic_runs, phonetic_properties) = phonetic_xml
+        .as_deref()
+        .map(parse_phonetic_xml)
+        .unwrap_or_default();
+    Some(domain_types::RichSharedString {
+        plain_text,
+        runs,
+        phonetic_runs,
+        phonetic_properties,
+        phonetic_xml,
+    })
 }
 
 fn numeric_original_value_is_writer_canonical(value: Option<&str>) -> bool {
@@ -294,6 +421,11 @@ pub(super) fn resolve_cell_value(cell: &FullCellData, _shared_strings: &[String]
             .as_ref()
             .map(|v| CellValue::Text(Arc::from(v.as_str())))
             .unwrap_or(CellValue::Text(Arc::from(""))),
+        CELL_TYPE_DATE => cell
+            .value
+            .as_ref()
+            .map(|v| CellValue::Text(Arc::from(v.as_str())))
+            .unwrap_or(CellValue::Null),
         CELL_TYPE_BOOL => {
             let b = cell
                 .value
@@ -354,6 +486,117 @@ pub(super) fn parse_error_code(s: &str) -> CellError {
         "#CALC!" => CellError::Calc,
         _ => CellError::Value,
     }
+}
+
+fn parse_phonetic_xml(
+    xml: &[u8],
+) -> (
+    Vec<domain_types::PhoneticRun>,
+    Option<domain_types::PhoneticProperties>,
+) {
+    let mut runs = Vec::new();
+    let mut pos = 0;
+    while let Some(start) = find_bytes(xml, b"<rPh", pos) {
+        let Some(end_tag) = find_bytes(xml, b"</rPh>", start) else {
+            break;
+        };
+        let end = end_tag + b"</rPh>".len();
+        let region = &xml[start..end];
+        let text = find_t_content(region)
+            .map(|text| decode_xml_text(text).unwrap_or_default())
+            .unwrap_or_default();
+        runs.push(domain_types::PhoneticRun {
+            text,
+            start_index: attr_u32(region, b"sb").unwrap_or(0),
+            end_index: attr_u32(region, b"eb").unwrap_or(0),
+        });
+        pos = end;
+    }
+
+    let phonetic_properties = find_bytes(xml, b"<phoneticPr", 0).map(|start| {
+        let end = xml[start..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|offset| start + offset + 1)
+            .unwrap_or(xml.len());
+        let region = &xml[start..end];
+        domain_types::PhoneticProperties {
+            font_id: attr_u32(region, b"fontId"),
+            phonetic_type: attr_string(region, b"type"),
+            alignment: attr_string(region, b"alignment"),
+        }
+    });
+
+    (runs, phonetic_properties)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    haystack
+        .get(start..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|pos| pos + start)
+}
+
+fn find_t_content(xml: &[u8]) -> Option<&[u8]> {
+    let start = find_bytes(xml, b"<t", 0)?;
+    let content_start = xml[start..].iter().position(|&b| b == b'>')? + start + 1;
+    let content_end = find_bytes(xml, b"</t>", content_start)?;
+    Some(&xml[content_start..content_end])
+}
+
+fn attr_u32(xml: &[u8], name: &[u8]) -> Option<u32> {
+    attr_string(xml, name)?.parse().ok()
+}
+
+fn attr_string(xml: &[u8], name: &[u8]) -> Option<String> {
+    let mut needle = Vec::with_capacity(name.len() + 2);
+    needle.extend_from_slice(name);
+    needle.extend_from_slice(b"=\"");
+    let start = find_bytes(xml, &needle, 0)? + needle.len();
+    let end = xml[start..].iter().position(|&b| b == b'"')? + start;
+    std::str::from_utf8(&xml[start..end])
+        .ok()
+        .map(str::to_owned)
+}
+
+fn decode_xml_text(xml: &[u8]) -> Option<String> {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < xml.len() {
+        if xml[i] == b'&' {
+            if xml[i..].starts_with(b"&amp;") {
+                out.push('&');
+                i += 5;
+                continue;
+            }
+            if xml[i..].starts_with(b"&lt;") {
+                out.push('<');
+                i += 4;
+                continue;
+            }
+            if xml[i..].starts_with(b"&gt;") {
+                out.push('>');
+                i += 4;
+                continue;
+            }
+            if xml[i..].starts_with(b"&quot;") {
+                out.push('"');
+                i += 6;
+                continue;
+            }
+            if xml[i..].starts_with(b"&apos;") {
+                out.push('\'');
+                i += 6;
+                continue;
+            }
+        }
+        let s = std::str::from_utf8(&xml[i..]).ok()?;
+        let ch = s.chars().next()?;
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    Some(out)
 }
 
 // =============================================================================

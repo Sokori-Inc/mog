@@ -24,9 +24,11 @@ pub mod named_range;
 pub mod page_breaks;
 pub mod print;
 pub mod protection;
+pub mod sheet_properties;
 pub mod sheet_view;
 // outline module deleted — hydration now writes SheetGroupingConfig directly via storage layer
 pub mod sparkline;
+pub mod web_publishing;
 pub mod workbook_properties;
 
 // Tier 1b: Y.Map with JSON bridge for complex nested fields
@@ -34,6 +36,7 @@ pub mod column_schema;
 
 // Tier 2: Y.Map with Y.Array for ordered sub-collections
 pub mod conditional_format;
+pub mod pivot_cache_records;
 pub mod table;
 pub mod validation;
 
@@ -48,8 +51,5 @@ pub mod sort_state;
 pub mod floating_object;
 pub mod slicer;
 
-// TEMPORARILY DISABLED: yrs_schema tests are broken due to concurrent domain type
-// restructurings (sparkline, conditional, comment, chart, pivot, etc.).
-// Re-enable once those modules are updated.
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;

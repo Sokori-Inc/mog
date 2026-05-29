@@ -7,6 +7,8 @@ use std::sync::Arc;
 use value_types::CellValue;
 use yrs::{Any, Map, MapPrelim, MapRef, Out};
 
+const KEY_RICH_STRING: &str = "rt";
+
 /// Build a `MapPrelim` for a cell entry.
 pub fn build_cell_prelim(
     value: &CellValue,
@@ -52,6 +54,28 @@ pub fn read_array_ref_from_yrs<T: yrs::ReadTxn>(cell_map: &MapRef, txn: &T) -> O
     }
 }
 
+/// Write cell-owned rich shared-string state onto an existing yrs cell map.
+pub fn write_rich_string_to_yrs(
+    cell_map: &MapRef,
+    txn: &mut yrs::TransactionMut<'_>,
+    rich_string: &domain_types::RichSharedString,
+) {
+    let json = serde_json::to_string(rich_string)
+        .expect("rich shared-string state should be JSON-serializable");
+    cell_map.insert(txn, KEY_RICH_STRING, Any::String(Arc::from(json)));
+}
+
+/// Read cell-owned rich shared-string state from a yrs cell map.
+pub fn read_rich_string_from_yrs<T: yrs::ReadTxn>(
+    cell_map: &MapRef,
+    txn: &T,
+) -> Option<domain_types::RichSharedString> {
+    match cell_map.get(txn, KEY_RICH_STRING) {
+        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json).ok(),
+        _ => None,
+    }
+}
+
 /// Write identity formula fields into an existing yrs cell map.
 pub fn write_identity_formula_to_yrs(
     cell_map: &MapRef,
@@ -90,6 +114,7 @@ pub fn cell_value_to_any(value: &CellValue) -> Any {
         CellValue::Error(e, _) => Any::String(Arc::from(e.as_str())),
         CellValue::Array(_) => Any::String(Arc::from(format!("{}", value).as_str())),
         CellValue::Control(c) => Any::Bool(c.value),
+        CellValue::Image(image) => Any::String(Arc::from(image.fallback_text())),
     }
 }
 

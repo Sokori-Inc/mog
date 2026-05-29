@@ -18,9 +18,11 @@ import {
   createDefaultPasteOptions,
   executePaste,
   getClipboardDimensions,
+  isMatchingFullShapePaste,
   type PasteStoreOperations,
 } from '../../../domain/clipboard';
 import type { clipboardMachine } from '../machines/clipboard-machine';
+import { trackPendingClipboardPaste } from './pending-clipboard-paste';
 
 // =============================================================================
 // TYPE DEFINITIONS
@@ -255,7 +257,9 @@ export function setupClipboardPasteIntegration(
     previousState = state;
 
     if (!wasPasting && isPasting) {
-      void handlePaste(state);
+      const pending = handlePaste(state);
+      trackPendingClipboardPaste(pending);
+      void pending;
     }
   });
 
@@ -301,6 +305,7 @@ export function setupClipboardPasteIntegration(
         const isMultiCellSelection = targetRows > 1 || targetCols > 1;
         const sizesMatch =
           sourceSize.rows === targetSize.rows && sourceSize.cols === targetSize.cols;
+        const fullShapeIntentMatches = isMatchingFullShapePaste(data.sourceRanges, selectionRange);
 
         // Handle special cases that don't need warnings
         // 1. Single cell source - can fill any selection (tiling)
@@ -311,7 +316,11 @@ export function setupClipboardPasteIntegration(
 
         // Show warning only for true mismatches (not exact multiples or single-cell sources)
         const needsWarning =
-          isMultiCellSelection && !sizesMatch && !isSingleCellSource && !isExactMultiple;
+          isMultiCellSelection &&
+          !sizesMatch &&
+          !fullShapeIntentMatches &&
+          !isSingleCellSource &&
+          !isExactMultiple;
 
         if (needsWarning) {
           // Cancel the paste and show dialog
@@ -512,7 +521,6 @@ export function setupClipboardPasteIntegration(
         // Cut-paste: Use cell relocation to preserve CellIds
         // This is architecturally correct - formulas referencing moved cells automatically work
         const sourceRange = sourceRanges[0]; // Currently only single-range cut supported
-
         const result = await store.relocateCells(
           toSheetId(data.sourceSheetId),
           sourceRange,
@@ -522,6 +530,13 @@ export function setupClipboardPasteIntegration(
         );
 
         if (result.success) {
+          await store.moveTablesForCutPaste?.(
+            toSheetId(data.sourceSheetId),
+            sourceRange,
+            sheetId,
+            pastePreviewTarget.row,
+            pastePreviewTarget.col,
+          );
           clipboardActor.send({ type: 'PASTE_COMPLETE' });
 
           // Calculate affected range for render invalidation
@@ -572,6 +587,16 @@ export function setupClipboardPasteIntegration(
 
         if (result.success) {
           if (isCut && sourceRanges && sourceRanges.length > 0 && data.sourceSheetId) {
+            for (const sourceRange of sourceRanges) {
+              await store.moveTablesForCutPaste?.(
+                toSheetId(data.sourceSheetId),
+                sourceRange,
+                sheetId,
+                pastePreviewTarget.row,
+                pastePreviewTarget.col,
+              );
+            }
+
             // Unmerge merges in source ranges
             if (store.getMergesInRange && store.unmergeRange) {
               for (const sourceRange of sourceRanges) {

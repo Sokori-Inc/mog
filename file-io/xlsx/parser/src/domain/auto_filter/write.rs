@@ -13,13 +13,19 @@ use domain_types::{AutoFilter, DateTimeGrouping, OoxmlFilterType};
 
 /// Serialize an `AutoFilter` into an OOXML XML fragment.
 pub fn write_auto_filter_xml(filter: &AutoFilter) -> String {
+    write_auto_filter_xml_with_strict(filter, false)
+}
+
+/// Serialize an `AutoFilter`, optionally suppressing Transitional-only attrs.
+pub fn write_auto_filter_xml_with_strict(filter: &AutoFilter, strict: bool) -> String {
     let mut w = XmlWriter::new();
     w.start_element("autoFilter").attr("ref", &filter.range_ref);
     if let Some(uid) = &filter.xr_uid {
         w.attr("xr:uid", uid);
     }
 
-    let has_children = !filter.columns.is_empty() || filter.sort.is_some();
+    let has_children =
+        !filter.columns.is_empty() || filter.sort.is_some() || filter.ext_lst_raw.is_some();
     if !has_children {
         w.self_close();
         return String::from_utf8(w.finish()).unwrap_or_default();
@@ -37,135 +43,26 @@ pub fn write_auto_filter_xml(filter: &AutoFilter) -> String {
             // Default is true; only emit when suppressed.
             w.attr("showButton", "0");
         }
+        let has_ext = fc.ext_lst_raw.is_some();
         let Some(filter_type) = &fc.filter_type else {
-            w.self_close();
+            if let Some(raw) = &fc.ext_lst_raw {
+                w.end_attrs();
+                w.raw_str(raw);
+                w.end_element("filterColumn");
+            } else {
+                w.self_close();
+            }
             continue;
         };
         w.end_attrs();
 
-        match filter_type {
-            OoxmlFilterType::Values {
-                values,
-                blanks,
-                calendar_type,
-                date_group_items,
-            } => {
-                w.start_element("filters");
-                if *blanks {
-                    w.attr("blank", "1");
-                }
-                if let Some(ct) = calendar_type {
-                    w.attr("calendarType", ct.to_ooxml_token());
-                }
-                w.end_attrs();
-                for val in values {
-                    w.start_element("filter").attr("val", val).self_close();
-                }
-                for dgi in date_group_items {
-                    w.start_element("dateGroupItem")
-                        .attr("year", &dgi.year.to_string());
-                    if let Some(m) = dgi.month {
-                        w.attr("month", &m.to_string());
-                    }
-                    if let Some(d) = dgi.day {
-                        w.attr("day", &d.to_string());
-                    }
-                    if let Some(h) = dgi.hour {
-                        w.attr("hour", &h.to_string());
-                    }
-                    if let Some(min) = dgi.minute {
-                        w.attr("minute", &min.to_string());
-                    }
-                    if let Some(s) = dgi.second {
-                        w.attr("second", &s.to_string());
-                    }
-                    // dateTimeGrouping is required per XSD.
-                    w.attr("dateTimeGrouping", dgi.date_time_grouping.to_ooxml_token());
-                    w.self_close();
-                }
-                w.end_element("filters");
-            }
-            OoxmlFilterType::Top10 {
-                top,
-                percent,
-                value,
-                filter_val,
-            } => {
-                w.start_element("top10");
-                if !top {
-                    w.attr("top", "0");
-                }
-                if *percent {
-                    w.attr("percent", "1");
-                }
-                w.attr("val", &format_f64_auto(*value));
-                if let Some(fv) = filter_val {
-                    w.attr("filterVal", &format_f64_auto(*fv));
-                }
-                w.self_close();
-            }
-            OoxmlFilterType::Custom {
-                conditions,
-                and_logic,
-            } => {
-                w.start_element("customFilters");
-                if *and_logic {
-                    w.attr("and", "1");
-                }
-                w.end_attrs();
-                for cond in conditions {
-                    let val_str = cell_value_to_filter_string(&cond.value);
-                    w.start_element("customFilter")
-                        .attr("operator", &cond.operator)
-                        .attr("val", &val_str)
-                        .self_close();
-                }
-                w.end_element("customFilters");
-            }
-            OoxmlFilterType::Dynamic {
-                dynamic_type,
-                value,
-                max_value,
-                value_iso,
-                max_value_iso,
-            } => {
-                w.start_element("dynamicFilter").attr("type", dynamic_type);
-                if let Some(v) = value {
-                    w.attr("val", &format_f64_auto(*v));
-                }
-                if let Some(mv) = max_value {
-                    w.attr("maxVal", &format_f64_auto(*mv));
-                }
-                if let Some(v) = value_iso {
-                    w.attr("valIso", v);
-                }
-                if let Some(mv) = max_value_iso {
-                    w.attr("maxValIso", mv);
-                }
-                w.self_close();
-            }
-            OoxmlFilterType::Color { dxf_id, cell_color } => {
-                // Typed OOXML preservation: now carries the real dxfId rather than
-                // hard-coding "0" and ignoring the runtime color token.
-                // When no dxfId is available, the attribute is omitted
-                // (still OOXML-valid per the schema).
-                w.start_element("colorFilter");
-                if let Some(id) = dxf_id {
-                    w.attr("dxfId", &id.to_string());
-                }
-                // `cellColor` defaults to true; only emit when false.
-                if !cell_color {
-                    w.attr("cellColor", "0");
-                }
-                w.self_close();
-            }
-            OoxmlFilterType::Icon { icon_set, icon_id } => {
-                w.start_element("iconFilter");
-                if let Some(set) = icon_set {
-                    w.attr("iconSet", set);
-                }
-                w.attr("iconId", &icon_id.to_string());
-                w.self_close();
+        write_filter_type_xml(&mut w, filter_type, strict);
+
+        // CT_FilterColumn is a choice. This path only replays a source-owned
+        // extLst alongside a known child when the imported owner carried both.
+        if has_ext {
+            if let Some(raw) = &fc.ext_lst_raw {
+                w.raw_str(raw);
             }
         }
 
@@ -177,8 +74,142 @@ pub fn write_auto_filter_xml(filter: &AutoFilter) -> String {
         write_sort_state_inner(&mut w, sort);
     }
 
+    if let Some(raw) = &filter.ext_lst_raw {
+        w.raw_str(raw);
+    }
+
     w.end_element("autoFilter");
     String::from_utf8(w.finish()).unwrap_or_default()
+}
+
+fn write_filter_type_xml(w: &mut XmlWriter, filter_type: &OoxmlFilterType, strict: bool) {
+    match filter_type {
+        OoxmlFilterType::Values {
+            values,
+            blanks,
+            calendar_type,
+            date_group_items,
+        } => {
+            w.start_element("filters");
+            if *blanks {
+                w.attr("blank", "1");
+            }
+            if let Some(ct) = calendar_type {
+                w.attr("calendarType", ct.to_ooxml_token());
+            }
+            w.end_attrs();
+            for val in values {
+                w.start_element("filter").attr("val", val).self_close();
+            }
+            for dgi in date_group_items {
+                w.start_element("dateGroupItem")
+                    .attr("year", &dgi.year.to_string());
+                if let Some(m) = dgi.month {
+                    w.attr("month", &m.to_string());
+                }
+                if let Some(d) = dgi.day {
+                    w.attr("day", &d.to_string());
+                }
+                if let Some(h) = dgi.hour {
+                    w.attr("hour", &h.to_string());
+                }
+                if let Some(min) = dgi.minute {
+                    w.attr("minute", &min.to_string());
+                }
+                if let Some(s) = dgi.second {
+                    w.attr("second", &s.to_string());
+                }
+                // dateTimeGrouping is required per XSD.
+                w.attr("dateTimeGrouping", dgi.date_time_grouping.to_ooxml_token());
+                w.self_close();
+            }
+            w.end_element("filters");
+        }
+        OoxmlFilterType::Top10 {
+            top,
+            percent,
+            value,
+            filter_val,
+        } => {
+            w.start_element("top10");
+            if !top {
+                w.attr("top", "0");
+            }
+            if *percent {
+                w.attr("percent", "1");
+            }
+            w.attr("val", &format_f64_auto(*value));
+            if let Some(fv) = filter_val {
+                w.attr("filterVal", &format_f64_auto(*fv));
+            }
+            w.self_close();
+        }
+        OoxmlFilterType::Custom {
+            conditions,
+            and_logic,
+        } => {
+            w.start_element("customFilters");
+            if *and_logic {
+                w.attr("and", "1");
+            }
+            w.end_attrs();
+            for cond in conditions {
+                let val_str = cell_value_to_filter_string(&cond.value);
+                w.start_element("customFilter")
+                    .attr("operator", &cond.operator)
+                    .attr("val", &val_str)
+                    .self_close();
+            }
+            w.end_element("customFilters");
+        }
+        OoxmlFilterType::Dynamic {
+            dynamic_type,
+            value,
+            max_value,
+            value_iso,
+            max_value_iso,
+        } => {
+            w.start_element("dynamicFilter").attr("type", dynamic_type);
+            if let Some(v) = value {
+                w.attr("val", &format_f64_auto(*v));
+            }
+            if !strict {
+                if let Some(mv) = max_value {
+                    w.attr("maxVal", &format_f64_auto(*mv));
+                }
+            }
+            if let Some(v) = value_iso {
+                w.attr("valIso", v);
+            }
+            if let Some(mv) = max_value_iso {
+                w.attr("maxValIso", mv);
+            }
+            w.self_close();
+        }
+        OoxmlFilterType::Color { dxf_id, cell_color } => {
+            // Typed OOXML preservation: now carries the real dxfId rather than
+            // hard-coding "0" and ignoring the runtime color token.
+            // When no dxfId is available, the attribute is omitted
+            // (still OOXML-valid per the schema).
+            w.start_element("colorFilter");
+            if let Some(id) = dxf_id {
+                w.attr("dxfId", &id.to_string());
+            }
+            // `cellColor` defaults to true; only emit when false.
+            if !cell_color {
+                w.attr("cellColor", "0");
+            }
+            w.self_close();
+        }
+        OoxmlFilterType::Icon { icon_set, icon_id } => {
+            w.start_element("iconFilter");
+            if let Some(set) = icon_set {
+                w.attr("iconSet", set);
+            }
+            w.attr("iconId", &icon_id.to_string());
+            w.self_close();
+        }
+    }
 }
 
 // Silence the unused-import warning when only some paths use DateTimeGrouping.
@@ -191,7 +222,7 @@ fn _dtg_tag(d: DateTimeGrouping) -> &'static str {
 /// `<autoFilter>`) into an OOXML XML fragment.
 ///
 /// Typed OOXML preservation: worksheet-level sort was previously
-/// round-tripped via a raw-XML sidecar on `SheetRoundTripContext`. Writer now
+/// round-tripped via a raw worksheet XML sidecar. Writer now
 /// reconstructs from the typed `SheetData.sort_state`.
 pub fn write_sort_state_xml(sort: &domain_types::SortState) -> String {
     let mut w = XmlWriter::new();
@@ -221,7 +252,7 @@ fn write_sort_state_inner(w: &mut XmlWriter, sort: &domain_types::SortState) {
         w.attr("sortMethod", sort.sort_method.to_ooxml_token());
     }
 
-    if sort.conditions.is_empty() {
+    if sort.conditions.is_empty() && sort.ext_lst_raw.is_none() {
         // Emit the self-closing form `<sortState .../>` when there are no
         // child conditions. Matches how the CT_SortState XSD permits an
         // element with just attributes.
@@ -252,6 +283,10 @@ fn write_sort_state_inner(w: &mut XmlWriter, sort: &domain_types::SortState) {
             w.attr("iconId", &icon_id.to_string());
         }
         w.self_close();
+    }
+
+    if let Some(raw) = &sort.ext_lst_raw {
+        w.raw_str(raw);
     }
 
     w.end_element("sortState");
@@ -300,9 +335,11 @@ mod tests {
                 hidden_button: true,
                 show_button: false,
                 filter_type: None,
+                ext_lst_raw: None,
             }],
             sort: None,
             xr_uid: None,
+            ext_lst_raw: None,
         };
         let xml = write_auto_filter_xml(&af);
 
@@ -326,6 +363,7 @@ mod tests {
             }],
             sort: None,
             xr_uid: None,
+            ext_lst_raw: None,
         };
         let xml = write_auto_filter_xml(&af);
 

@@ -47,6 +47,16 @@ pub fn pivot_table_to_writer(pt: &read::PivotTable) -> PivotTableWriter {
     });
 
     writer.data_on_rows = pt.data_on_rows;
+    writer.grand_total_caption = pt.grand_total_caption.clone();
+    writer.row_header_caption = pt.row_header_caption.clone();
+    writer.col_header_caption = pt.col_header_caption.clone();
+    writer.row_grand_totals = pt.row_grand_totals;
+    writer.col_grand_totals = pt.col_grand_totals;
+    writer.grid_drop_zones = pt.grid_drop_zones;
+    writer.error_caption = pt.error_caption.clone();
+    writer.show_error = pt.show_error;
+    writer.missing_caption = pt.missing_caption.clone();
+    writer.show_missing = pt.show_missing;
 
     // Pivot fields
     for field in &pt.pivot_fields {
@@ -107,8 +117,10 @@ fn convert_pivot_field(f: &read::PivotField) -> PivotFieldDef {
         auto_sort_data_field: f.auto_sort_data_field,
         subtotal_top: f.subtotal_top,
         default_subtotal: f.default_subtotal,
-        subtotals: Vec::new(), // Subtotals are encoded as pivotField attributes in the original
+        subtotals: f.subtotals.iter().map(|s| convert_subtotal(*s)).collect(),
         items: f.items.iter().map(convert_pivot_item).collect(),
+        preserved_attributes: Vec::new(),
+        preserved_children: Vec::new(),
     }
 }
 
@@ -128,6 +140,7 @@ fn convert_pivot_item(item: &read::PivotItem) -> PivotFieldItem {
         hidden: item.hidden,
         show_details: item.show_details,
         s: item.s.clone(),
+        preserved_attributes: Vec::new(),
     }
 }
 
@@ -170,6 +183,7 @@ fn convert_data_field(df: &read::DataField) -> DataFieldDef {
         num_fmt_id: df.num_fmt_id,
         base_field: df.base_field,
         base_item: df.base_item,
+        show_data_as: df.show_data_as.clone(),
     }
 }
 
@@ -207,11 +221,16 @@ pub fn pivot_cache_to_writer(cache: &read::PivotCache) -> PivotCacheWriter {
 
     writer.source = CacheSource {
         source_type,
-        worksheet_source: if cache.source_ref.is_some() || cache.source_sheet.is_some() {
+        worksheet_source: if cache.source_ref.is_some()
+            || cache.source_sheet.is_some()
+            || cache.source_name.is_some()
+            || cache.source_r_id.is_some()
+        {
             Some(WorksheetSource {
                 sheet_name: cache.source_sheet.clone(),
+                source_name: cache.source_name.clone(),
                 range_ref: cache.source_ref.clone().unwrap_or_default(),
-                r_id: None,
+                r_id: cache.source_r_id.clone(),
             })
         } else {
             None
@@ -297,9 +316,30 @@ pub fn pivot_table_def_to_writer(
     });
 
     writer.data_on_rows = def.data_on_rows;
+    writer.grand_total_caption = def.grand_total_caption.clone();
+    writer.row_header_caption = def.row_header_caption.clone();
+    writer.col_header_caption = def.col_header_caption.clone();
+    writer.row_grand_totals = def.row_grand_totals;
+    writer.col_grand_totals = def.col_grand_totals;
+    writer.grid_drop_zones = def.grid_drop_zones;
+    writer.error_caption = def.error_caption.clone();
+    writer.show_error = def.show_error;
+    writer.missing_caption = def.missing_caption.clone();
+    writer.show_missing = def.show_missing;
+    writer.ooxml_preservation = def.ooxml_preservation.clone();
 
-    for f in &def.fields {
-        writer.add_field(convert_domain_field(f));
+    for (idx, f) in def.fields.iter().enumerate() {
+        let mut field = convert_domain_field(f);
+        if let Some(preserved) = def.ooxml_preservation.fields.get(idx) {
+            field.preserved_attributes = preserved.attributes.clone();
+            field.preserved_children = preserved.children.clone();
+            for (item_idx, item) in field.items.iter_mut().enumerate() {
+                if let Some(attrs) = preserved.item_attributes.get(item_idx) {
+                    item.preserved_attributes = attrs.clone();
+                }
+            }
+        }
+        writer.add_field(field);
     }
 
     writer.row_fields = def.row_fields.clone();
@@ -324,15 +364,24 @@ pub fn pivot_table_def_to_writer(
             num_fmt_id: df.num_fmt_id,
             base_field: df.base_field,
             base_item: df.base_item,
+            show_data_as: df.show_data_as.clone(),
         });
     }
 
     // Row items / column items
-    for ri in &def.row_items {
-        writer.add_row_item(convert_domain_row_col_item(ri));
+    for (idx, ri) in def.row_items.iter().enumerate() {
+        let mut item = convert_domain_row_col_item(ri);
+        if let Some(attrs) = def.ooxml_preservation.row_item_attributes.get(idx) {
+            item.preserved_attributes = attrs.clone();
+        }
+        writer.add_row_item(item);
     }
-    for ci in &def.col_items {
-        writer.add_col_item(convert_domain_row_col_item(ci));
+    for (idx, ci) in def.col_items.iter().enumerate() {
+        let mut item = convert_domain_row_col_item(ci);
+        if let Some(attrs) = def.ooxml_preservation.col_item_attributes.get(idx) {
+            item.preserved_attributes = attrs.clone();
+        }
+        writer.add_col_item(item);
     }
 
     // Data caption
@@ -385,8 +434,11 @@ fn convert_domain_field(f: &domain_types::PivotFieldDef) -> PivotFieldDef {
                 hidden: item.hidden,
                 show_details: item.show_details,
                 s: item.s.clone(),
+                preserved_attributes: Vec::new(),
             })
             .collect(),
+        preserved_attributes: Vec::new(),
+        preserved_children: Vec::new(),
     }
 }
 
@@ -410,6 +462,7 @@ fn convert_domain_row_col_item(item: &domain_types::PivotRowColItem) -> RowColIt
     RowColItem {
         item_type: item.item_type.map(convert_domain_item_type),
         x_values: item.x_values.clone(),
+        preserved_attributes: Vec::new(),
     }
 }
 

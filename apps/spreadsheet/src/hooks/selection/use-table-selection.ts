@@ -16,7 +16,7 @@
  * @see engine/src/state/coordinator/features/table/table-selection-coordination.ts
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { TableInfo } from '@mog-sdk/contracts/api';
 import type { TableStylePreset } from '@mog-sdk/contracts/tables';
@@ -51,6 +51,13 @@ const TABLE_STYLE_PRESETS = [
   'light19',
   'light20',
   'light21',
+  'light22',
+  'light23',
+  'light24',
+  'light25',
+  'light26',
+  'light27',
+  'light28',
   'medium1',
   'medium2',
   'medium3',
@@ -94,8 +101,15 @@ const TABLE_STYLE_PRESETS = [
 
 function normalizeTableStylePreset(style: string | undefined): TableStylePreset | undefined {
   if (!style) return undefined;
-  return (TABLE_STYLE_PRESETS as readonly string[]).includes(style)
-    ? (style as TableStylePreset)
+  const normalized = style.trim();
+  if ((TABLE_STYLE_PRESETS as readonly string[]).includes(normalized)) {
+    return normalized as TableStylePreset;
+  }
+  const full = normalized.match(/^TableStyle(Light|Medium|Dark)(\d+)$/i);
+  if (!full) return undefined;
+  const preset = `${full[1].toLowerCase()}${full[2]}`;
+  return (TABLE_STYLE_PRESETS as readonly string[]).includes(preset)
+    ? (preset as TableStylePreset)
     : undefined;
 }
 
@@ -119,6 +133,7 @@ export interface UseTableSelectionReturn {
   showLastColumnHighlight: boolean;
   hasHeaderRow: boolean;
   hasTotalRow: boolean;
+  showFilterButtons: boolean;
 
   // === Actions ===
 
@@ -145,6 +160,9 @@ export interface UseTableSelectionReturn {
 
   /** Toggle total row */
   toggleTotalRow: () => void;
+
+  /** Toggle filter buttons */
+  toggleFilterButtons: () => void;
 
   /** Delete the table (keep data) */
   deleteTable: () => void;
@@ -179,39 +197,95 @@ export function useTableSelection(): UseTableSelectionReturn {
   const { row: activeRow, col: activeCol } = useActiveCell();
   const wb = useWorkbook();
   const ws = wb.getSheetById(activeSheetId);
+  const openConvertToRangeDialog = useUIStore((s) => s.openConvertToRangeDialog);
 
   // Read selectedTableId from UIStore - updated by TableSelectionCoordination
   // This is the ONLY subscription in this hook (no selection subscriptions)
   const selectedTableId = useUIStore((s) => s.tableDesign.selectedTableId);
 
   const [table, setTable] = useState<TableInfo | null>(null);
+  const refreshGenerationRef = useRef(0);
+  const refreshContextRef = useRef({
+    wb,
+    selectedTableId,
+    activeSheetId,
+    activeRow,
+    activeCol,
+  });
+  refreshContextRef.current = { wb, selectedTableId, activeSheetId, activeRow, activeCol };
 
-  useEffect(() => {
+  const refreshSelectedTable = useCallback(async () => {
+    const generation = ++refreshGenerationRef.current;
+    const context = { wb, selectedTableId, activeSheetId, activeRow, activeCol };
+    const commitTable = (nextTable: TableInfo | null) => {
+      const currentContext = refreshContextRef.current;
+      if (generation !== refreshGenerationRef.current) return false;
+      if (
+        currentContext.wb !== context.wb ||
+        currentContext.selectedTableId !== context.selectedTableId ||
+        currentContext.activeSheetId !== context.activeSheetId ||
+        currentContext.activeRow !== context.activeRow ||
+        currentContext.activeCol !== context.activeCol
+      ) {
+        return false;
+      }
+      setTable(nextTable);
+      return true;
+    };
+
     if (!selectedTableId) {
-      setTable(null);
+      commitTable(null);
       return;
     }
 
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const wsForTable = wb.getSheetById(activeSheetId);
-        const result = await wsForTable.tables.getAtCell(activeRow, activeCol);
-        if (!cancelled) {
-          setTable(result ?? null);
-        }
-      } catch {
-        if (!cancelled) {
-          setTable(null);
-        }
+    try {
+      const wsForTable = wb.getSheetById(activeSheetId);
+      const byName = await wsForTable.tables.get(selectedTableId);
+      if (generation !== refreshGenerationRef.current) return;
+      if (byName) {
+        commitTable(byName);
+        return;
       }
-    })();
+      const byCell = await wsForTable.tables.getAtCell(activeRow, activeCol);
+      commitTable(byCell ?? null);
+    } catch {
+      commitTable(null);
+    }
+  }, [wb, selectedTableId, activeSheetId, activeRow, activeCol]);
+
+  useEffect(() => {
+    void refreshSelectedTable();
 
     return () => {
-      cancelled = true;
+      refreshGenerationRef.current += 1;
     };
-  }, [wb, selectedTableId, activeSheetId, activeRow, activeCol]);
+  }, [refreshSelectedTable]);
+
+  useEffect(() => {
+    if (!selectedTableId) return;
+    const wsForTable = wb.getSheetById(activeSheetId);
+    const refresh = () => {
+      void refreshSelectedTable();
+    };
+    const clearIfDeleted = (event: { tableId?: string; sheetId?: string }) => {
+      if (event.sheetId && event.sheetId !== activeSheetId) return;
+      if (!event.tableId || event.tableId === selectedTableId || event.tableId === table?.name) {
+        refreshGenerationRef.current += 1;
+        setTable(null);
+      }
+    };
+    const unsubs = [
+      wsForTable.on('table:created', refresh),
+      wsForTable.on('table:updated', refresh),
+      wsForTable.on('table:resized', refresh),
+      wsForTable.on('table:total-row-changed', refresh),
+      wsForTable.on('table:converted-to-range', clearIfDeleted),
+      wsForTable.on('table:deleted', clearIfDeleted),
+    ];
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
+  }, [wb, activeSheetId, selectedTableId, table?.name, refreshSelectedTable]);
 
   // Extract style options from TableInfo (now directly available from Rust)
   const showBandedRows = table?.bandedRows ?? true;
@@ -220,55 +294,69 @@ export function useTableSelection(): UseTableSelectionReturn {
   const showLastColumnHighlight = table?.emphasizeLastColumn ?? false;
   const hasHeaderRow = table?.hasHeaderRow ?? true;
   const hasTotalRow = table?.hasTotalsRow ?? false;
+  const showFilterButtons = table?.showFilterButtons ?? true;
   const stylePreset = normalizeTableStylePreset(table?.style);
 
   // === Actions ===
 
   const handleRenameTable = useCallback(
-    (newName: string) => {
+    async (newName: string) => {
       if (!table) return;
-      void ws.tables.rename(table.name, newName);
+      await ws.tables.rename(table.name, newName);
+      await refreshSelectedTable();
     },
-    [ws, table],
+    [ws, table, refreshSelectedTable],
   );
 
   const setStylePreset = useCallback(
-    (preset: TableStylePreset) => {
+    async (preset: TableStylePreset) => {
       if (!table) return;
-      void ws.tables.setStylePreset(table.name, preset);
+      await ws.tables.setStylePreset(table.name, preset);
+      await refreshSelectedTable();
     },
-    [ws, table],
+    [ws, table, refreshSelectedTable],
   );
 
   const toggleBandedRows = useCallback(() => {
     if (!table) return;
-    void ws.tables.setShowBandedRows(table.name, !showBandedRows);
-  }, [ws, table, showBandedRows]);
+    void ws.tables.setShowBandedRows(table.name, !showBandedRows).then(refreshSelectedTable);
+  }, [ws, table, showBandedRows, refreshSelectedTable]);
 
   const toggleBandedColumns = useCallback(() => {
     if (!table) return;
-    void ws.tables.update(table.name, { bandedColumns: !showBandedColumns });
-  }, [ws, table, showBandedColumns]);
+    void ws.tables
+      .update(table.name, { bandedColumns: !showBandedColumns })
+      .then(refreshSelectedTable);
+  }, [ws, table, showBandedColumns, refreshSelectedTable]);
 
   const toggleFirstColumnHighlight = useCallback(() => {
     if (!table) return;
-    void ws.tables.update(table.name, { emphasizeFirstColumn: !showFirstColumnHighlight });
-  }, [ws, table, showFirstColumnHighlight]);
+    void ws.tables
+      .update(table.name, { emphasizeFirstColumn: !showFirstColumnHighlight })
+      .then(refreshSelectedTable);
+  }, [ws, table, showFirstColumnHighlight, refreshSelectedTable]);
 
   const toggleLastColumnHighlight = useCallback(() => {
     if (!table) return;
-    void ws.tables.update(table.name, { emphasizeLastColumn: !showLastColumnHighlight });
-  }, [ws, table, showLastColumnHighlight]);
+    void ws.tables
+      .update(table.name, { emphasizeLastColumn: !showLastColumnHighlight })
+      .then(refreshSelectedTable);
+  }, [ws, table, showLastColumnHighlight, refreshSelectedTable]);
 
   const toggleHeaderRow = useCallback(() => {
     if (!table) return;
-    void ws.tables.setShowHeaders(table.name, !table.hasHeaderRow);
-  }, [ws, table]);
+    void ws.tables.setShowHeaders(table.name, !table.hasHeaderRow).then(refreshSelectedTable);
+  }, [ws, table, refreshSelectedTable]);
 
   const toggleTotalRow = useCallback(() => {
     if (!table) return;
-    void ws.tables.setShowTotals(table.name, !table.hasTotalsRow);
-  }, [ws, table]);
+    void ws.tables.setShowTotals(table.name, !table.hasTotalsRow).then(refreshSelectedTable);
+  }, [ws, table, refreshSelectedTable]);
+
+  const toggleFilterButtons = useCallback(() => {
+    if (!table) return;
+    void ws.tables.setShowFilterButton(table.name, !showFilterButtons).then(refreshSelectedTable);
+  }, [ws, table, showFilterButtons, refreshSelectedTable]);
 
   const handleDeleteTable = useCallback(() => {
     if (!table) return;
@@ -277,10 +365,8 @@ export function useTableSelection(): UseTableSelectionReturn {
 
   const handleConvertToRange = useCallback(() => {
     if (!table) return;
-    // TODO: need ws.convertToRange(tableName) — using deleteTable as workaround
-    // (deleteTable does not convert structured refs to A1, unlike the proper convertToRange)
-    void ws.tables.remove(table.name);
-  }, [ws, table]);
+    openConvertToRangeDialog(table.name);
+  }, [table, openConvertToRangeDialog]);
 
   return {
     isInTable: table !== null,
@@ -293,6 +379,7 @@ export function useTableSelection(): UseTableSelectionReturn {
     showLastColumnHighlight,
     hasHeaderRow,
     hasTotalRow,
+    showFilterButtons,
     renameTable: handleRenameTable,
     setStylePreset,
     toggleBandedRows,
@@ -301,6 +388,7 @@ export function useTableSelection(): UseTableSelectionReturn {
     toggleLastColumnHighlight,
     toggleHeaderRow,
     toggleTotalRow,
+    toggleFilterButtons,
     deleteTable: handleDeleteTable,
     convertToRange: handleConvertToRange,
   };

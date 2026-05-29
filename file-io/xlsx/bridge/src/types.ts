@@ -13,8 +13,14 @@
 // These types are auto-generated from the Rust output structs and accurately
 // reflect what the WASM parser actually produces. Import these when you need
 // the exact Rust output shape.
+// The bridge shape is a semantic subset of XLSX import state. Rust-internal
+// fidelity sidecars can preserve additional OOXML for in-process export, but
+// they are not exposed here as editable TypeScript data.
 
-import type { FormControlOutput as _FormControlOutput } from '@mog/bridge-ts/generated/xlsx-types';
+import type {
+  FormControlOutput as _FormControlOutput,
+  OleObjectOutput as _OleObjectOutput,
+} from '@mog/bridge-ts/generated/xlsx-types';
 export type {
   AlignmentOutput,
   CellProtectionOutput,
@@ -23,6 +29,7 @@ export type {
   FormControlOutput,
   HeaderFooterOutput,
   MarginsOutput,
+  OleObjectOutput,
   PageBreakOutput,
   PageBreaksOutput,
   SlicerAnchor as ParsedSlicerAnchor,
@@ -58,6 +65,9 @@ export type {
   ExternalDefinedName,
   ExternalLink,
   ExternalLinkExtraRel,
+  ExternalLinkRelationship,
+  ExternalLinkRelationshipCurrentness,
+  ExternalLinkRelationshipRole,
   ExternalLinkType,
 } from '@mog/bridge-ts/generated/xlsx-types';
 
@@ -180,7 +190,10 @@ export interface FullParseResult {
   metadata: WorkbookMetadata;
   /** External workbook links */
   externalLinks: ExternalLink[];
-  /** Calculation chain entries */
+  /**
+   * @deprecated Calculation chains are recalculation caches and are intentionally
+   * dropped by production parsing/export. This array is always empty.
+   */
   calcChain: CalcChainEntry[];
   /** Custom document properties */
   customProperties: CustomProperty[];
@@ -217,6 +230,18 @@ export interface RichTextEntry {
 export interface RichTextRun {
   /** Text content of this run */
   text: string;
+  /** OOXML underline token for rich text runs */
+  underlineStyle?: 'none' | 'single' | 'double' | 'singleAccounting' | 'doubleAccounting';
+  /** Legacy underline projection; true means single underline when underlineStyle is absent */
+  underline?: boolean;
+  /** Rich text run outline flag */
+  outline?: boolean;
+  /** Rich text run shadow flag */
+  shadow?: boolean;
+  /** Rich text run condense flag */
+  condense?: boolean;
+  /** Rich text run extend flag */
+  extend?: boolean;
   /** Font properties for this run */
   font?: ParsedFont;
 }
@@ -305,6 +330,8 @@ export interface FullParsedSheet {
 
   /** Form controls (checkboxes, dropdowns, buttons, scroll bars, etc.) */
   formControls: _FormControlOutput[];
+  /** OLE objects and embedded package placeholders parsed from worksheet XML. */
+  oleObjects?: _OleObjectOutput[];
 
   /** Sheet-level parse errors */
   errors: ParseErrorDetail[];
@@ -887,12 +914,23 @@ export interface FilterColumn {
   filters?: {
     blank?: boolean;
     values: string[];
+    calendarType?: string;
+    dateGroupItems?: Array<{
+      year: number;
+      month?: number;
+      day?: number;
+      hour?: number;
+      minute?: number;
+      second?: number;
+      dateTimeGrouping: 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second';
+    }>;
   };
   /** Top 10 filter */
   top10?: {
     top?: boolean;
     percent?: boolean;
     val: number;
+    filterVal?: number;
   };
   /** Custom filters */
   customFilters?: {
@@ -906,11 +944,19 @@ export interface FilterColumn {
   dynamicFilter?: {
     type: string;
     val?: number;
+    maxVal?: number;
+    valIso?: string;
+    maxValIso?: string;
   };
   /** Color filter */
   colorFilter?: {
     dxfId?: number;
     cellColor?: boolean;
+  };
+  /** Icon filter */
+  iconFilter?: {
+    iconSet?: string;
+    iconId?: number;
   };
 }
 
@@ -1076,6 +1122,10 @@ export interface Hyperlink {
 export interface PrintSettings {
   /** Paper size */
   paperSize?: number;
+  /** Custom paper width */
+  paperWidth?: string;
+  /** Custom paper height */
+  paperHeight?: string;
   /** Orientation */
   orientation?: 'portrait' | 'landscape';
   /** Scale percentage */
@@ -1096,6 +1146,8 @@ export interface PrintSettings {
   headerFooter?: HeaderFooter;
   /** Print gridlines */
   gridLines?: boolean;
+  /** Gridlines set flag */
+  gridLinesSet?: boolean;
   /** Print headings */
   headings?: boolean;
   /** Center horizontally on page */
@@ -1112,6 +1164,17 @@ export interface PrintSettings {
   horizontalDpi?: number;
   /** Vertical DPI */
   verticalDpi?: number;
+  /** Number of copies */
+  copies?: number;
+  /** Page setup properties */
+  pageSetupProperties?: PageSetupProperties;
+}
+
+export interface PageSetupProperties {
+  /** Fit to page */
+  fitToPage: boolean;
+  /** Automatic page breaks */
+  autoPageBreaks: boolean;
 }
 
 /**
@@ -1288,14 +1351,6 @@ export interface ParsedStyles {
   cellXfs: CellXf[];
   /** Named cell styles */
   cellStyles: NamedCellStyle[];
-  /** Differential formats */
-  dxfs: DifferentialFormat[];
-  /** Table styles */
-  tableStyles: ParsedTableStyle[];
-  /** Default table style name */
-  defaultTableStyle?: string;
-  /** Default pivot style name */
-  defaultPivotStyle?: string;
 }
 
 /**
@@ -1844,7 +1899,8 @@ export interface WorkbookMetadata {
 }
 
 /**
- * Calculation chain entry.
+ * @deprecated Legacy calculation-chain DTO. Production parsing does not expose
+ * calc-chain dependency semantics and `FullParseResult.calcChain` is always empty.
  */
 export interface CalcChainEntry {
   /** Cell reference */
@@ -2329,9 +2385,6 @@ export interface FullParseOptions {
 
   /** Only parse specific sheets (by name) */
   sheetFilter?: string[];
-
-  /** Password for encrypted workbooks */
-  password?: string;
 
   /** Parse cell values only (no formulas, styles) */
   valuesOnly?: boolean;

@@ -518,6 +518,23 @@ export async function create(
   };
 
   await ctx.computeBridge.setNamedRange(input.name, def);
+
+  if (typeof input.comment === 'string' && input.comment.length > 0) {
+    const created = await getByName(ctx, input.name, input.scope);
+    if (!created) {
+      throw new KernelError(
+        'DOMAIN_DEFINED_NAME_NOT_FOUND',
+        `Created defined name ${input.name} could not be read back for comment persistence`,
+      );
+    }
+
+    await ctx.computeBridge.updateNamedRange(created.id, {
+      name: null,
+      refersTo: null,
+      comment: input.comment,
+      visible: null,
+    });
+  }
 }
 
 /**
@@ -577,7 +594,7 @@ export async function remove(
     throw new KernelError('DOMAIN_DEFINED_NAME_NOT_FOUND', `Defined name with ID ${id} not found`);
   }
 
-  void ctx.computeBridge.removeNamedRangeById(existing.id);
+  await ctx.computeBridge.removeNamedRangeById(existing.id);
 }
 
 /**

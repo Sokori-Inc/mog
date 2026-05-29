@@ -1,132 +1,57 @@
-//! Style conversion: DocumentFormat / Stylesheet → StylesWriter.
+//! Style conversion: DocumentFormat → StylesWriter.
 
 use domain_types::{
-    AlignmentFormat, BorderFormat, BorderSide, DocumentFormat, FillFormat, FontFormat,
+    AlignmentFormat, BorderFormat, BorderSide, DocumentFormat, FillFormat, FontFormat, ParseOutput,
     ProtectionFormat,
 };
 
-use crate::domain::styles::write::{
+use crate::domain::styles::types::{
     AlignmentDef, BorderDef, BorderSideDef, BorderStyle, CellXfDef, ColorDef, FillDef, FontDef,
-    FontScheme, HorizontalAlign, PatternType, ProtectionDef, StylesWriter, UnderlineStyle,
-    VerticalAlign,
+    FontScheme, GradientStop, GradientType, HorizontalAlign, PatternType, ProtectionDef,
+    UnderlineStyle, VerticalAlign, VerticalAlignRun,
 };
+use crate::domain::styles::write::StylesWriter;
 
-/// Build a `StylesWriter` from a palette of `DocumentFormat` entries.
-///
-/// Build a `StylesWriter` directly from a parsed OOXML `Stylesheet`.
-///
-/// This is the **lossless** path: every style component (fonts, fills, borders,
-/// cellXfs, cellStyleXfs, cellStyles, dxfs, numFmts, colors, tableStyles) is
-/// transferred directly — no theme color resolution, no flattening, no
-/// information loss. The types are identical (`ooxml_types::styles::*`).
-///
-/// Used when `RoundTripContext.parsed_stylesheet` is available (i.e., the file
-/// was parsed from an XLSX and we have the original style hierarchy).
-pub(super) fn build_styles_from_stylesheet(
-    stylesheet: &ooxml_types::styles::Stylesheet,
-    ext_lst_raw: Option<&[u8]>,
-    namespace_attrs: &[(String, String)],
-) -> StylesWriter {
-    let mut writer = StylesWriter::new();
-
-    // Transfer all style components directly — same ooxml_types, zero conversion.
-    writer.num_fmts = stylesheet.num_fmts.clone();
-    writer.fonts = stylesheet.fonts.clone();
-    writer.fills = stylesheet.fills.clone();
-    writer.borders = stylesheet.borders.clone();
-    writer.cell_xfs = stylesheet.cell_xfs.clone();
-    writer.cell_style_xfs = stylesheet.cell_style_xfs.clone();
-    writer.cell_styles = stylesheet.cell_styles.clone();
-    writer.dxfs = stylesheet.dxfs.clone();
-    writer.colors = stylesheet.colors.clone();
-    writer.table_styles = stylesheet.table_styles.clone();
-    writer.default_table_style = stylesheet.default_table_style.clone();
-    writer.default_pivot_style = stylesheet.default_pivot_style.clone();
-    writer.known_fonts = stylesheet.known_fonts;
-    writer.ext_lst_raw = ext_lst_raw.map(|b| b.to_vec());
-
-    // Reconstruct namespace map from preserved (prefix, uri) pairs.
-    if !namespace_attrs.is_empty() {
-        use crate::roundtrip::namespaces::NamespaceMap;
-        let mut ns_map = NamespaceMap::new();
-        for (prefix, uri) in namespace_attrs {
-            if prefix.is_empty() {
-                ns_map.set_default(uri);
-            } else {
-                ns_map.add_prefixed(prefix, uri);
-            }
-        }
-        writer.preserved_namespaces = Some(ns_map);
-    }
-
-    writer
-}
-
-/// Build a `StylesWriter` from a flat `DocumentFormat` palette (lossy fallback).
+/// Build a `StylesWriter` from the modeled `DocumentFormat` export palette.
 ///
 /// Each `DocumentFormat` in the palette becomes a cellXf entry. The returned
 /// writer's cellXfs[0] is always the default style (empty `DocumentFormat`);
 /// cellXfs[N] for N >= 1 corresponds to `palette[N-1]`.
 ///
-/// The caller can use `style_id` values from `CellData` directly as indices
-/// into the palette — they get offset by +1 when building `CellData` for the
-/// writer (because cellXfs[0] is the default).
+/// The caller uses `style_id` values from `CellData` as indices into this
+/// generated palette. Sheet writing offsets those ids by +1 because
+/// `cellXfs[0]` is the default.
 pub(super) fn build_styles(palette: &[DocumentFormat]) -> StylesWriter {
     let mut writer = StylesWriter::with_defaults();
 
     // The default style is already at cellXfs[0] from with_defaults().
     // Now add one cellXf per palette entry.
     for doc_fmt in palette {
-        let font_id = doc_fmt
-            .font
-            .as_ref()
-            .map(|f| writer.add_font(convert_font(f)))
-            .unwrap_or(0);
+        let components = add_style_components(&mut writer, doc_fmt);
 
-        let fill_id = doc_fmt
-            .fill
-            .as_ref()
-            .map(|f| writer.add_fill(convert_fill(f)))
-            .unwrap_or(0);
-
-        let border_id = doc_fmt
-            .border
-            .as_ref()
-            .map(|b| writer.add_border(convert_border(b)))
-            .unwrap_or(0);
-
-        let num_fmt_id = doc_fmt
-            .number_format
-            .as_ref()
-            .map(|nf| writer.add_num_fmt(nf))
-            .unwrap_or(0);
-
-        let alignment = doc_fmt.alignment.as_ref().map(convert_alignment);
-        let protection = doc_fmt.protection.as_ref().map(convert_protection);
-
-        let has_font = font_id != 0;
-        let has_fill = fill_id != 0;
-        let has_border = border_id != 0;
-        let has_num_fmt = num_fmt_id != 0;
-        let has_alignment = alignment.is_some();
-        let has_protection = protection.is_some();
+        let has_font = components.font_id != 0;
+        let has_fill = components.fill_id != 0;
+        let has_border = components.border_id != 0;
+        let has_num_fmt = components.num_fmt_id != 0;
+        let has_alignment = components.alignment.is_some();
+        let has_protection = components.protection.is_some();
 
         let xf = CellXfDef {
-            num_fmt_id: Some(num_fmt_id),
-            font_id: Some(font_id),
-            fill_id: Some(fill_id),
-            border_id: Some(border_id),
+            num_fmt_id: Some(components.num_fmt_id),
+            font_id: Some(components.font_id),
+            fill_id: Some(components.fill_id),
+            border_id: Some(components.border_id),
             xf_id: Some(0),
-            alignment,
-            protection,
+            alignment: components.alignment,
+            protection: components.protection,
             apply_number_format: if has_num_fmt { Some(true) } else { None },
             apply_font: if has_font { Some(true) } else { None },
             apply_fill: if has_fill { Some(true) } else { None },
             apply_border: if has_border { Some(true) } else { None },
             apply_alignment: if has_alignment { Some(true) } else { None },
             apply_protection: if has_protection { Some(true) } else { None },
-            pivot_button: false,
-            quote_prefix: false,
+            pivot_button: doc_fmt.pivot_button.unwrap_or(false),
+            quote_prefix: doc_fmt.quote_prefix.unwrap_or(false),
             ext_lst: None,
         };
 
@@ -136,73 +61,153 @@ pub(super) fn build_styles(palette: &[DocumentFormat]) -> StylesWriter {
     writer
 }
 
-/// Append `DocumentFormat` palette entries to a lossless `StylesWriter`.
-///
-/// When format mutations occur on XLSX-imported cells, the export clears
-/// their `xlsxStyleId` and adds the new format to `style_palette`. This
-/// function converts those palette entries and appends them as new cellXf
-/// entries after the original stylesheet entries, so cells referencing
-/// `original_cellxfs_count + palette_idx` resolve correctly.
-pub(super) fn append_palette_to_lossless_styles(
-    writer: &mut StylesWriter,
-    palette: &[DocumentFormat],
-) {
-    for doc_fmt in palette {
-        let font_id = doc_fmt
-            .font
-            .as_ref()
-            .map(|f| writer.add_font(convert_font(f)))
-            .unwrap_or(0);
+struct StyleComponentIds {
+    font_id: u32,
+    fill_id: u32,
+    border_id: u32,
+    num_fmt_id: u32,
+    alignment: Option<AlignmentDef>,
+    protection: Option<ProtectionDef>,
+}
 
-        let fill_id = doc_fmt
-            .fill
-            .as_ref()
-            .map(|f| writer.add_fill(convert_fill(f)))
-            .unwrap_or(0);
+fn add_style_components(writer: &mut StylesWriter, doc_fmt: &DocumentFormat) -> StyleComponentIds {
+    let font_id = doc_fmt
+        .font
+        .as_ref()
+        .map(|f| writer.add_font(convert_font(f)))
+        .unwrap_or(0);
 
-        let border_id = doc_fmt
-            .border
-            .as_ref()
-            .map(|b| writer.add_border(convert_border(b)))
-            .unwrap_or(0);
+    let fill_id = doc_fmt
+        .fill
+        .as_ref()
+        .map(|f| writer.add_fill(convert_fill(f)))
+        .unwrap_or(0);
 
-        let num_fmt_id = doc_fmt
-            .number_format
-            .as_ref()
-            .map(|nf| writer.add_num_fmt(nf))
-            .unwrap_or(0);
+    let border_id = doc_fmt
+        .border
+        .as_ref()
+        .map(|b| writer.add_border(convert_border(b)))
+        .unwrap_or(0);
 
-        let alignment = doc_fmt.alignment.as_ref().map(convert_alignment);
-        let protection = doc_fmt.protection.as_ref().map(convert_protection);
+    let num_fmt_id = doc_fmt
+        .number_format
+        .as_ref()
+        .map(|nf| writer.add_num_fmt(nf))
+        .unwrap_or(0);
 
-        let has_font = font_id != 0;
-        let has_fill = fill_id != 0;
-        let has_border = border_id != 0;
-        let has_num_fmt = num_fmt_id != 0;
-        let has_alignment = alignment.is_some();
-        let has_protection = protection.is_some();
-
-        let xf = CellXfDef {
-            num_fmt_id: Some(num_fmt_id),
-            font_id: Some(font_id),
-            fill_id: Some(fill_id),
-            border_id: Some(border_id),
-            xf_id: Some(0),
-            alignment,
-            protection,
-            apply_number_format: if has_num_fmt { Some(true) } else { None },
-            apply_font: if has_font { Some(true) } else { None },
-            apply_fill: if has_fill { Some(true) } else { None },
-            apply_border: if has_border { Some(true) } else { None },
-            apply_alignment: if has_alignment { Some(true) } else { None },
-            apply_protection: if has_protection { Some(true) } else { None },
-            pivot_button: false,
-            quote_prefix: false,
-            ext_lst: None,
-        };
-
-        writer.add_cell_xf(xf);
+    StyleComponentIds {
+        font_id,
+        fill_id,
+        border_id,
+        num_fmt_id,
+        alignment: doc_fmt.alignment.as_ref().map(convert_alignment),
+        protection: doc_fmt.protection.as_ref().map(convert_protection),
     }
+}
+
+/// Whether the current modeled workbook references any style IDs.
+///
+/// If all style references disappeared, emitting the modeled palette would keep
+/// stale style facts alive after deletion.
+pub(super) fn output_references_style_ids(output: &ParseOutput) -> bool {
+    output.sheets.iter().any(|sheet| {
+        sheet.cells.iter().any(|cell| cell.style_id.is_some())
+            || !sheet.authored_style_runs.is_empty()
+            || !sheet.row_styles.is_empty()
+            || !sheet.col_styles.is_empty()
+            || sheet
+                .dimensions
+                .trailing_col_ranges
+                .iter()
+                .any(|range| range.style_id.is_some())
+            || sheet_uses_dxf_or_table_style(sheet)
+    })
+}
+
+fn sheet_uses_dxf_or_table_style(sheet: &domain_types::SheetData) -> bool {
+    sheet
+        .conditional_formats
+        .iter()
+        .any(conditional_format_uses_dxf)
+        || sheet.auto_filter.as_ref().is_some_and(auto_filter_uses_dxf)
+        || sheet.sort_state.as_ref().is_some_and(sort_state_uses_dxf)
+        || sheet.tables.iter().any(table_uses_dxf_or_table_style)
+}
+
+fn conditional_format_uses_dxf(cf: &domain_types::ConditionalFormat) -> bool {
+    cf.rules
+        .iter()
+        .filter_map(conditional_format_rule_style)
+        .any(|style| style.dxf_id.is_some())
+}
+
+fn conditional_format_rule_style(rule: &domain_types::CFRule) -> Option<&domain_types::CFStyle> {
+    match rule {
+        domain_types::CFRule::CellValue { style, .. }
+        | domain_types::CFRule::Formula { style, .. }
+        | domain_types::CFRule::Top10 { style, .. }
+        | domain_types::CFRule::AboveAverage { style, .. }
+        | domain_types::CFRule::DuplicateValues { style, .. }
+        | domain_types::CFRule::ContainsText { style, .. }
+        | domain_types::CFRule::ContainsBlanks { style, .. }
+        | domain_types::CFRule::ContainsErrors { style, .. }
+        | domain_types::CFRule::TimePeriod { style, .. } => Some(style),
+        domain_types::CFRule::ColorScale { .. }
+        | domain_types::CFRule::DataBar { .. }
+        | domain_types::CFRule::IconSet { .. } => None,
+    }
+}
+
+fn auto_filter_uses_dxf(auto_filter: &domain_types::AutoFilter) -> bool {
+    auto_filter.columns.iter().any(filter_column_uses_dxf)
+        || auto_filter.sort.as_ref().is_some_and(sort_state_uses_dxf)
+}
+
+fn filter_column_uses_dxf(column: &domain_types::FilterColumn) -> bool {
+    matches!(
+        column.filter_type,
+        Some(domain_types::OoxmlFilterType::Color {
+            dxf_id: Some(_),
+            ..
+        })
+    )
+}
+
+fn sort_state_uses_dxf(sort_state: &domain_types::SortState) -> bool {
+    sort_state
+        .conditions
+        .iter()
+        .any(|condition| condition.dxf_id.is_some())
+}
+
+fn table_uses_dxf_or_table_style(table: &domain_types::TableSpec) -> bool {
+    table.style_name.is_some()
+        || table.header_row_dxf_id.is_some()
+        || table.data_dxf_id.is_some()
+        || table.totals_row_dxf_id.is_some()
+        || table.header_row_border_dxf_id.is_some()
+        || table.table_border_dxf_id.is_some()
+        || table.totals_row_border_dxf_id.is_some()
+        || table.header_row_cell_style.is_some()
+        || table.data_cell_style.is_some()
+        || table.totals_row_cell_style.is_some()
+        || table.columns.iter().any(|column| {
+            column.header_row_dxf_id.is_some()
+                || column.data_dxf_id.is_some()
+                || column.totals_row_dxf_id.is_some()
+                || column.header_row_cell_style.is_some()
+                || column.data_cell_style.is_some()
+                || column.totals_row_cell_style.is_some()
+        })
+        || table.filter_columns.iter().any(|column| {
+            matches!(
+                column.filter,
+                domain_types::FilterSpec::Color {
+                    dxf_id: Some(_),
+                    ..
+                }
+            )
+        })
 }
 
 /// Convert a `FontFormat` to a `FontDef`.
@@ -226,11 +231,27 @@ fn convert_font(font: &FontFormat) -> FontDef {
             "minor" => FontScheme::Minor,
             _ => FontScheme::None,
         }),
-        condense: None,
-        extend: None,
-        outline: None,
-        shadow: None,
-        vert_align: None,
+        condense: font.condense,
+        extend: font.extend,
+        outline: font.outline,
+        shadow: font.shadow,
+        vert_align: font
+            .vertical_align
+            .as_deref()
+            .and_then(|s| match s {
+                "baseline" => Some(VerticalAlignRun::Baseline),
+                "superscript" => Some(VerticalAlignRun::Superscript),
+                "subscript" => Some(VerticalAlignRun::Subscript),
+                _ => None,
+            })
+            .or_else(|| {
+                font.superscript
+                    .and_then(|v| v.then_some(VerticalAlignRun::Superscript))
+                    .or_else(|| {
+                        font.subscript
+                            .and_then(|v| v.then_some(VerticalAlignRun::Subscript))
+                    })
+            }),
     }
 }
 
@@ -277,6 +298,28 @@ fn convert_fill(fill: &FillFormat) -> FillDef {
         .as_deref()
         .map(|c| hex_to_color_def_with_tint(c, fill.background_color_tint));
 
+    if let Some(gradient) = &fill.gradient_fill {
+        return FillDef::Gradient {
+            gradient_type: match gradient.gradient_type.as_str() {
+                "path" => GradientType::Path,
+                _ => GradientType::Linear,
+            },
+            degree: gradient.degree,
+            stops: gradient
+                .stops
+                .iter()
+                .map(|stop| GradientStop {
+                    position: stop.position,
+                    color: hex_to_color_def(&stop.color),
+                })
+                .collect(),
+            left: gradient.center.as_ref().map(|c| c.left),
+            right: None,
+            top: gradient.center.as_ref().map(|c| c.top),
+            bottom: None,
+        };
+    }
+
     FillDef::Pattern {
         pattern_type: Some(pattern_type),
         fg_color,
@@ -292,7 +335,10 @@ fn convert_border(border: &BorderFormat) -> BorderDef {
                 tracing::warn!(token = %s.style, "unknown BorderStyle on BorderSide → BorderSideDef conversion; using None");
                 BorderStyle::None
             });
-            let color = s.color.as_deref().map(hex_to_color_def);
+            let color = s
+                .color
+                .as_deref()
+                .map(|color| hex_to_color_def_with_tint(color, s.color_tint));
             BorderSideDef { style, color }
         })
     };

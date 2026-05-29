@@ -293,6 +293,14 @@ fn test_cfvo_parse_formula() {
 }
 
 #[test]
+fn test_cfvo_parse_x14_child_formula_value() {
+    let xml = br#"<x14:cfvo type="num"><xm:f>1</xm:f></x14:cfvo>"#;
+    let cfvo = parse_cfvo(xml);
+    assert_eq!(cfvo.cfvo_type, CfvoType::Num);
+    assert_eq!(cfvo.val, Some("1".to_string()));
+}
+
+#[test]
 fn test_cfvo_parse_gte_false() {
     let xml = b"<cfvo type=\"num\" val=\"50\" gte=\"0\"/>";
     let cfvo = parse_cfvo(xml);
@@ -406,6 +414,22 @@ fn test_data_bar_x14_extensions() {
     assert!(db.border_color.is_some());
     assert!(db.negative_fill_color.is_some());
     assert!(db.axis_color.is_some());
+}
+
+#[test]
+fn test_data_bar_x14_cfvo_child_formula_values() {
+    let xml = br#"<x14:dataBar gradient="0">
+        <x14:cfvo type="num"><xm:f>0</xm:f></x14:cfvo>
+        <x14:cfvo type="num"><xm:f>1</xm:f></x14:cfvo>
+        <x14:negativeFillColor rgb="FFFF0000"/>
+        <x14:axisColor rgb="FF000000"/>
+    </x14:dataBar>"#;
+    let db = parse_data_bar(xml);
+    assert_eq!(db.cfvo.len(), 2);
+    assert_eq!(db.cfvo[0].cfvo_type, CfvoType::Num);
+    assert_eq!(db.cfvo[0].val.as_deref(), Some("0"));
+    assert_eq!(db.cfvo[1].cfvo_type, CfvoType::Num);
+    assert_eq!(db.cfvo[1].val.as_deref(), Some("1"));
 }
 
 // -------------------------------------------------------------------------
@@ -722,15 +746,15 @@ fn test_cf_rule_x14_data_bar() {
 
 #[test]
 fn test_conditional_formatting_x14() {
-    let xml = br#"<conditionalFormatting>
-        <sqref>A1:A10</sqref>
-        <cfRule type="dataBar" id="{GUID}">
-            <dataBar gradient="1">
-                <cfvo type="min"/>
-                <cfvo type="max"/>
-            </dataBar>
-        </cfRule>
-    </conditionalFormatting>"#;
+    let xml = br#"<x14:conditionalFormatting xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">
+        <xm:sqref>A1:A10</xm:sqref>
+        <x14:cfRule type="dataBar" id="{GUID}">
+            <x14:dataBar gradient="1">
+                <x14:cfvo type="min"/>
+                <x14:cfvo type="max"/>
+            </x14:dataBar>
+        </x14:cfRule>
+    </x14:conditionalFormatting>"#;
     let cf = parse_conditional_formatting_x14_element(xml);
     assert_eq!(cf.sqref, "A1:A10");
     assert_eq!(cf.rules.len(), 1);

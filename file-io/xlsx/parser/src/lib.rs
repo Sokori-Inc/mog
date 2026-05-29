@@ -14,7 +14,7 @@
 //! Modules are organized into logical groups:
 //! - **`read/`** — Domain-specific parsers (strings, styles, workbook, etc.)
 //! - **`pipeline/`** — Parse orchestration (full, fast, lazy, streaming)
-//! - **`roundtrip/`** — Round-trip fidelity (attribute order, namespaces, unknown elements)
+//! - **`infra/`** — Shared XML, ZIP, namespace, and parser infrastructure
 //! - **`output/`** — Result types and serialization helpers
 //! - **Root-level** — Infrastructure (error handling, scanner, arena, etc.)
 //! - **Domain subdirs** — Complex feature parsers (cell_parser, charts, tables, etc.)
@@ -77,8 +77,7 @@ pub(crate) fn now_us() -> f64 {
 
 // Infrastructure
 pub mod bridge;
-pub mod common;
-pub mod infra; // keep for now (range types still here)
+pub mod infra;
 
 // Domain modules (all OOXML features)
 pub mod domain;
@@ -86,7 +85,7 @@ pub mod domain;
 // Orchestration
 pub mod output;
 pub mod pipeline; // Parse orchestration
-pub mod roundtrip; // Fidelity preservation
+pub mod testing; // Shared test contract adapters
 pub mod zip; // ZIP archive reading // Result types (was: wasm/)
 
 // Write pipeline
@@ -154,9 +153,10 @@ pub use zip::{XlsxArchive, ZipEntry, ZipError};
 pub use write::{
     CT_CHART, CT_COMMENTS, CT_CORE_PROPERTIES, CT_CUSTOM_PROPERTIES, CT_DRAWING, CT_EMF,
     CT_EXTENDED_PROPERTIES, CT_GIF, CT_JPEG, CT_METADATA, CT_PIVOT_CACHE, CT_PIVOT_TABLE, CT_PNG,
-    CT_RELATIONSHIPS, CT_SHARED_STRINGS, CT_STYLES, CT_TABLE, CT_THEME, CT_VBA, CT_WMF,
-    CT_WORKBOOK, CT_WORKSHEET, CT_XML, CompressionMethod, ContentTypeDefault, ContentTypeOverride,
-    ContentTypesManager, ZipWriteEntry, ZipWriteError, ZipWriter, create_xlsx_content_types,
+    CT_RELATIONSHIPS, CT_SHARED_STRINGS, CT_STYLES, CT_TABLE, CT_TABLE_SINGLE_CELLS, CT_THEME,
+    CT_VBA, CT_WMF, CT_WORKBOOK, CT_WORKSHEET, CT_XML, CompressionMethod, ContentTypeDefault,
+    ContentTypeOverride, ContentTypesManager, ZipWriteEntry, ZipWriteError, ZipWriter,
+    create_xlsx_content_types,
 };
 
 // =============================================================================
@@ -164,10 +164,13 @@ pub use write::{
 // =============================================================================
 
 pub use domain::controls::read::{
-    ActiveXControl, AnchorSource, CheckState, ControlAnchor, FormControl, FormControlProperties,
-    FormControlType, ModernAnchorResult, OleObject, WorksheetControl, WorksheetControls,
     extract_vml_shape_number, parse_vml_imagedata, parse_worksheet_controls,
     parse_worksheet_controls_from_xml,
+};
+pub use domain::controls::types::{
+    ActiveXControl, AnchorSource, CheckState, ControlAnchor, FormControl, FormControlProperties,
+    FormControlType, ModernAnchorResult, OleObject, WorksheetControl, WorksheetControlRef,
+    WorksheetControls,
 };
 pub use domain::external::ExternalLinks;
 pub use domain::hyperlinks::{
@@ -191,10 +194,8 @@ pub use domain::sparklines::read::{
     SparklineGroups, SparklineType, parse_sparklines,
 };
 pub use domain::strings::read::SharedStrings;
-pub use domain::styles::read::{
-    CellXfDef, NumberFormatDef, Stylesheet, builtin_format, get_number_format, is_date_format,
-    parse_styles,
-};
+pub use domain::styles::read::{builtin_format, get_number_format, is_date_format, parse_styles};
+pub use domain::styles::types::{CellXfDef, NumberFormatDef, Stylesheet};
 pub use domain::tables::{
     AutoFilter, FilterColumn, Table, TableColumn, TableStyleInfo, TableType, TotalsRowFunction,
 };
@@ -210,25 +211,19 @@ pub use domain_types::domain::external_link::{
 };
 
 // =============================================================================
-// === Round-Trip Fidelity ===
+// === XML Infrastructure And Import Helpers ===
 // =============================================================================
 
-pub use roundtrip::attr_order::{
-    AttributeOrder, AttributeWriter, ElementAttributes, PreservedAttribute,
+pub use infra::imported_parts::{
+    CT_OLE_OBJECT, CT_PRINTER_SETTINGS, ImportedPackageParts, infer_content_type,
 };
-pub use roundtrip::binary_passthrough::{
-    BinaryPassthrough, CT_OLE_OBJECT, CT_PRINTER_SETTINGS, infer_content_type,
-};
-pub use roundtrip::namespaces::{
+pub use infra::xml_fragment::{extract_element_bounds, extract_element_xml};
+pub use infra::xml_namespaces::{
     NS_CONTENT_TYPES, NS_DRAWING_ML, NS_MC, NS_RELATIONSHIPS, NS_SPREADSHEET_ML, NS_X14,
     NamespaceDeclaration, NamespaceMap, NamespaceWriter, styles_namespaces, workbook_namespaces,
     worksheet_namespaces,
 };
-pub use roundtrip::preservation::ExtensionPreservation;
-pub use roundtrip::unknown_elements::{
-    PreservedElements, PreservedPosition, PreservedWriter, PreservedXml, UnknownElementCapture,
-    extract_element_bounds, extract_element_xml,
-};
+pub use pipeline::import_extensions::ImportExtensionParts;
 
 // =============================================================================
 // === Streaming & Infrastructure ===
@@ -253,10 +248,10 @@ pub use domain::comments::read::parse_comments_for_sheet;
 pub use domain::cond_format::read::parse_conditional_formats;
 pub use domain::pivot::read::parse_all_pivot_caches;
 pub use domain::tables::read::parse_tables_for_sheet;
-pub use domain::validation::read::parse_data_validations;
+pub use domain::validation::read::{parse_data_validations, parse_x14_data_validations};
 pub use domain::worksheet::read::{
-    merge_cells_has_count, parse_col_widths, parse_dimensions, parse_frozen_pane,
-    parse_merge_cells, parse_sheet_format_pr, parse_sheet_view, parse_sheet_views,
+    parse_col_widths, parse_dimensions, parse_frozen_pane, parse_merge_cells,
+    parse_sheet_format_pr, parse_sheet_view, parse_sheet_views,
 };
 
 // =============================================================================
@@ -270,18 +265,10 @@ pub(crate) use output::to_parse_output::full_parse_result_to_parse_output;
 ///
 /// Returns:
 /// - `ParseOutput`: Semantic data (cells, merges, styles, domain objects)
-/// - `RoundTripContext`: Raw XML preservation blobs for lossless re-export
 /// - `ParseDiagnostics`: Parse errors and statistics
 pub fn parse_xlsx_to_output(
     xlsx_data: &[u8],
-) -> Result<
-    (
-        domain_types::ParseOutput,
-        domain_types::RoundTripContext,
-        domain_types::ParseDiagnostics,
-    ),
-    String,
-> {
+) -> Result<(domain_types::ParseOutput, domain_types::ParseDiagnostics), String> {
     let result = parse_xlsx_full_native(xlsx_data, None)?;
     Ok(full_parse_result_to_parse_output(&result))
 }
@@ -292,14 +279,7 @@ pub fn parse_xlsx_to_output(
 pub fn parse_xlsx_to_output_max_sheets(
     xlsx_data: &[u8],
     max_sheets: usize,
-) -> Result<
-    (
-        domain_types::ParseOutput,
-        domain_types::RoundTripContext,
-        domain_types::ParseDiagnostics,
-    ),
-    String,
-> {
+) -> Result<(domain_types::ParseOutput, domain_types::ParseDiagnostics), String> {
     let result =
         pipeline::full_parse::parse_xlsx_full_native_max_sheets(xlsx_data, None, max_sheets)?;
     Ok(full_parse_result_to_parse_output(&result))
@@ -366,13 +346,13 @@ mod tests {
     /// are correctly normalized to ZIP paths during export.
     #[test]
     fn test_chart_double_round_trip() {
-        let fixture = include_bytes!("../../../../dev/api-eval/fixtures/charts_showcase_2.xlsx");
-        let (output1, rt1, _) = parse_xlsx_to_output(fixture).expect("first parse failed");
+        let fixture = include_bytes!("../test-corpus/parity/charts/chart-bar.xlsx");
+        let (output1, _) = parse_xlsx_to_output(fixture).expect("first parse failed");
         let charts_1: usize = output1.sheets.iter().map(|s| s.charts.len()).sum();
         assert!(charts_1 > 0, "original should have charts");
 
         // Export
-        let exported = write::from_parse_output::write_xlsx_from_parse_output(&output1, Some(&rt1))
+        let exported = write::from_parse_output::write_xlsx_from_parse_output(&output1)
             .expect("export failed");
 
         // Verify drawing paths in the exported archive are correct
@@ -394,8 +374,34 @@ mod tests {
         }
 
         // Re-import and verify charts survive
-        let (output2, _, _) = parse_xlsx_to_output(&exported).expect("re-import failed");
+        let (output2, _) = parse_xlsx_to_output(&exported).expect("re-import failed");
         let charts_2: usize = output2.sheets.iter().map(|s| s.charts.len()).sum();
         assert_eq!(charts_2, charts_1, "charts lost during re-import");
+    }
+
+    #[test]
+    fn chart_xml_stabilizes_after_reimport_export() {
+        let fixture = include_bytes!("../test-corpus/parity/charts/chart-bar.xlsx");
+        let (output1, _) = parse_xlsx_to_output(fixture).expect("first parse failed");
+        let exported1 = write::from_parse_output::write_xlsx_from_parse_output(&output1)
+            .expect("first export failed");
+
+        let (output2, _) = parse_xlsx_to_output(&exported1).expect("second parse failed");
+        let exported2 = write::from_parse_output::write_xlsx_from_parse_output(&output2)
+            .expect("second export failed");
+
+        let archive1 = crate::zip::XlsxArchive::new(&exported1).expect("first archive");
+        let archive2 = crate::zip::XlsxArchive::new(&exported2).expect("second archive");
+        let chart1 = archive1
+            .read_file("xl/charts/chart1.xml")
+            .expect("first chart XML");
+        let chart2 = archive2
+            .read_file("xl/charts/chart1.xml")
+            .expect("second chart XML");
+
+        assert_eq!(
+            chart2, chart1,
+            "canonical chart XML changed after re-import/export"
+        );
     }
 }

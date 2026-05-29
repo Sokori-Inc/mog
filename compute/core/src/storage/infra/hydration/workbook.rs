@@ -12,6 +12,10 @@ use cell_types::SheetId;
 
 use super::IdAllocator;
 
+const KEY_VOLATILE_DEPENDENCY_PACKAGE_PART: &str = "volatileDependencyPackagePart";
+const KEY_CUSTOM_WORKBOOK_VIEWS_XML: &str = "customWorkbookViewsXml";
+const KEY_THREADED_COMMENT_PERSON_ORDER: &str = "threadedCommentPersonOrder";
+
 // ===========================================================================
 // Workbook-level hydration
 // ===========================================================================
@@ -35,20 +39,10 @@ pub(super) fn hydrate_workbook_named_ranges(
     // pre-fix dependency on the eager bulk-insert at `from_snapshot` time.
     let nr_map = crate::storage::ensure_workbook_child_map(workbook, txn, KEY_NAMED_RANGES);
     // Store defined names in Yrs — including hidden ones (e.g. _xlnm._FilterDatabase,
-    // _xlchart.v*) — so they survive the L2 round-trip.
-    // Skip workbook-scoped #REF!-only entries: these are orphaned artifacts from
-    // Excel that shadow valid sheet-scoped names and confuse API consumers.
-    // Sheet-scoped entries (even broken ones) are kept for round-trip fidelity.
+    // _xlchart.v*) and workbook-scoped broken names — so they survive the L2
+    // round-trip. API/UI consumers can filter stale names at query boundaries;
+    // hydration must preserve workbook state for export fidelity.
     for (idx, nr) in named_ranges.iter().enumerate() {
-        if nr.local_sheet_id.is_none()
-            && !is_external_workbook_ref(&nr.refers_to)
-            && matches!(
-                compute_parser::ParsedExpr::classify(&nr.refers_to),
-                compute_parser::ParsedExpr::BrokenRef { .. } | compute_parser::ParsedExpr::Empty
-            )
-        {
-            continue;
-        }
         // Resolve local_sheet_id (index) to a SheetId hex string for scope
         let scope: Option<String> = nr.local_sheet_id.and_then(|idx| {
             sheet_ids
@@ -60,11 +54,12 @@ pub(super) fn hydrate_workbook_named_ranges(
         // monotonic uniqueness — the ID just needs to be a unique hex string)
         let id = id_to_hex(allocator.alloc_cell_id().as_u128()).to_string();
 
-        let raw_refers_to = if should_preserve_defined_name_ref_opaque(&nr.name, &nr.refers_to) {
-            Some(nr.refers_to.clone())
-        } else {
-            None
-        };
+        let raw_refers_to =
+            if nr.hidden || should_preserve_defined_name_ref_opaque(&nr.name, &nr.refers_to) {
+                Some(nr.refers_to.clone())
+            } else {
+                None
+            };
 
         let defined_name = domain_types::DefinedName {
             id,
@@ -190,6 +185,72 @@ pub(super) fn hydrate_workbook_tables(
     }
 }
 
+pub(super) fn hydrate_workbook_connections(
+    workbook: &MapRef,
+    connections: &domain_types::domain::connections::WorkbookConnectionSet,
+    txn: &mut yrs::TransactionMut,
+) {
+    if connections.is_empty() {
+        return;
+    }
+    let Some(json) = serde_json::to_string(connections).ok() else {
+        return;
+    };
+    let map = crate::storage::ensure_workbook_child_map(workbook, txn, KEY_WORKBOOK_CONNECTIONS);
+    map.insert(txn, "data", Any::String(Arc::from(json.as_str())));
+}
+
+pub(super) fn hydrate_workbook_root_namespaces(
+    workbook: &MapRef,
+    namespaces: &domain_types::XmlNamespaceDeclarations,
+    txn: &mut yrs::TransactionMut,
+) {
+    if namespaces.is_empty() {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(namespaces) {
+        let settings_map =
+            crate::storage::ensure_workbook_child_map(workbook, txn, KEY_WORKBOOK_SETTINGS);
+        settings_map.insert(
+            txn,
+            "workbookRootNamespaces",
+            Any::String(Arc::from(json.as_str())),
+        );
+    }
+}
+
+pub(super) fn hydrate_workbook_table_styles(
+    workbook: &MapRef,
+    table_styles: &[ooxml_types::styles::TableStyleDef],
+    default_table_style: &Option<String>,
+    default_pivot_style: &Option<String>,
+    txn: &mut yrs::TransactionMut,
+) {
+    if table_styles.is_empty() && default_table_style.is_none() && default_pivot_style.is_none() {
+        return;
+    }
+
+    let styles_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_XLSX_TABLE_STYLES);
+    if let Ok(json) = serde_json::to_string(table_styles) {
+        styles_map.insert(txn, "styles", Any::String(Arc::from(json.as_str())));
+    }
+    if let Some(style) = default_table_style {
+        styles_map.insert(
+            txn,
+            "defaultTableStyle",
+            Any::String(Arc::from(style.as_str())),
+        );
+    }
+    if let Some(style) = default_pivot_style {
+        styles_map.insert(
+            txn,
+            "defaultPivotStyle",
+            Any::String(Arc::from(style.as_str())),
+        );
+    }
+}
+
 /// Write a `ThemeData` value into the workbook-level `"theme"` map in Yrs.
 ///
 /// This is the single source of truth for persisting theme data. Both the
@@ -260,6 +321,115 @@ pub(super) fn hydrate_workbook_calculation(
     }
 }
 
+/// Hydrate workbook view state into workbook settings.
+///
+/// Workbook views are workbook-level UI state from workbook.xml (`activeTab`,
+/// `firstSheet`, window geometry, tab visibility, etc.). Parser and writer both
+/// model them in `ParseOutput`; L2 must persist them through Yrs so production
+/// import/export does not silently reset workbook.xml to `<workbookView/>`.
+pub(super) fn hydrate_workbook_views(
+    workbook: &MapRef,
+    workbook_views: &[domain_types::domain::workbook::WorkbookView],
+    txn: &mut yrs::TransactionMut,
+) {
+    if workbook_views.is_empty() {
+        return;
+    }
+
+    let settings_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_WORKBOOK_SETTINGS);
+    if let Ok(json) = serde_json::to_string(workbook_views) {
+        settings_map.insert(txn, "workbookViews", Any::String(Arc::from(json.as_str())));
+    }
+}
+
+pub(super) fn hydrate_custom_workbook_views_xml(
+    workbook: &MapRef,
+    custom_workbook_views_xml: &Option<Vec<u8>>,
+    txn: &mut yrs::TransactionMut,
+) {
+    let Some(xml) = custom_workbook_views_xml else {
+        return;
+    };
+    if xml.is_empty() {
+        return;
+    }
+
+    let settings_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_WORKBOOK_SETTINGS);
+    if let Ok(json) = serde_json::to_string(xml) {
+        settings_map.insert(
+            txn,
+            KEY_CUSTOM_WORKBOOK_VIEWS_XML,
+            Any::String(Arc::from(json.as_str())),
+        );
+    }
+}
+
+/// Hydrate workbook web publishing metadata into a workbook-level Y.Map.
+pub(super) fn hydrate_workbook_web_publishing(
+    workbook: &MapRef,
+    web_publishing: &Option<domain_types::domain::workbook::WorkbookWebPublishing>,
+    txn: &mut yrs::TransactionMut,
+) {
+    let Some(web_publishing) = web_publishing else {
+        return;
+    };
+
+    let entries = yrs_schema::web_publishing::to_yrs_prelim(web_publishing);
+    if entries.is_empty() {
+        return;
+    }
+
+    let web_map = crate::storage::ensure_workbook_child_map(workbook, txn, KEY_WEB_PUBLISHING);
+    for (key, value) in entries {
+        web_map.insert(txn, key, value);
+    }
+}
+
+/// Hydrate workbook-level threaded comment person identities.
+///
+/// Threaded comments store `person_id` on each comment, but Excel resolves that
+/// id through `xl/persons/person.xml`. Persist the modeled `PersonInfo` list so
+/// production XLSX export can emit the person part from current workbook state.
+pub(super) fn hydrate_workbook_threaded_comment_persons(
+    workbook: &MapRef,
+    persons: &[domain_types::domain::comment::PersonInfo],
+    has_persons_part: bool,
+    txn: &mut yrs::TransactionMut,
+) {
+    if !has_persons_part && persons.is_empty() {
+        return;
+    }
+
+    workbook.insert(
+        txn,
+        KEY_THREADED_COMMENT_PERSONS_PART_PRESENT,
+        Any::Bool(true),
+    );
+
+    if persons.is_empty() {
+        return;
+    }
+
+    let persons_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_THREADED_COMMENT_PERSONS);
+    let mut person_order = Vec::with_capacity(persons.len());
+    for person in persons {
+        person_order.push(person.id.clone());
+        if let Ok(json) = serde_json::to_string(person) {
+            persons_map.insert(txn, &*person.id, Any::String(Arc::from(json.as_str())));
+        }
+    }
+    if let Ok(json) = serde_json::to_string(&person_order) {
+        workbook.insert(
+            txn,
+            KEY_THREADED_COMMENT_PERSON_ORDER,
+            Any::String(Arc::from(json.as_str())),
+        );
+    }
+}
+
 /// Hydrate all workbook metadata (properties, file version, file sharing) into Yrs.
 ///
 /// - `WorkbookProperties` fields go into the existing `workbookSettings` map.
@@ -270,6 +440,8 @@ pub(super) fn hydrate_workbook_metadata(
     workbook: &MapRef,
     workbook_properties: &Option<domain_types::domain::workbook::WorkbookProperties>,
     document_properties: &Option<domain_types::DocumentProperties>,
+    extended_properties: &Option<domain_types::ExtendedDocumentProperties>,
+    xlsx_metadata: &Option<domain_types::WorkbookMetadata>,
     file_version: &Option<domain_types::domain::workbook::FileVersion>,
     file_sharing: &Option<domain_types::domain::workbook::FileSharing>,
     txn: &mut yrs::TransactionMut,
@@ -294,6 +466,27 @@ pub(super) fn hydrate_workbook_metadata(
         }
     }
 
+    if let Some(props) = extended_properties {
+        let extended_props_map = crate::storage::ensure_workbook_child_map(
+            workbook,
+            txn,
+            KEY_EXTENDED_DOCUMENT_PROPERTIES,
+        );
+        if let Ok(json) = serde_json::to_string(props) {
+            extended_props_map.insert(txn, "data", Any::String(Arc::from(json.as_str())));
+        }
+    }
+
+    if let Some(metadata) = xlsx_metadata
+        && !metadata.is_empty()
+    {
+        let metadata_map =
+            crate::storage::ensure_workbook_child_map(workbook, txn, KEY_XLSX_METADATA);
+        if let Ok(json) = serde_json::to_string(metadata) {
+            metadata_map.insert(txn, "data", Any::String(Arc::from(json.as_str())));
+        }
+    }
+
     // FileVersion → fileVersion map
     if let Some(fv) = file_version {
         let fv_map = crate::storage::ensure_workbook_child_map(workbook, txn, KEY_FILE_VERSION);
@@ -308,6 +501,60 @@ pub(super) fn hydrate_workbook_metadata(
         for (key, value) in yrs_schema::file_sharing::to_yrs_prelim(fs) {
             fs_map.insert(txn, key, value);
         }
+    }
+}
+
+pub(super) fn hydrate_shared_string_hints(
+    workbook: &MapRef,
+    hints: &[domain_types::SharedStringHint],
+    txn: &mut yrs::TransactionMut,
+) {
+    if hints.is_empty() {
+        return;
+    }
+    let hints_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_SHARED_STRING_HINTS);
+    if let Ok(json) = serde_json::to_string(hints) {
+        hints_map.insert(txn, "data", Any::String(Arc::from(json.as_str())));
+    }
+}
+
+pub(super) fn hydrate_package_fidelity_metadata(
+    workbook: &MapRef,
+    package_fidelity: &Option<domain_types::PackageFidelityMetadata>,
+    txn: &mut yrs::TransactionMut,
+) {
+    let Some(package_fidelity) = package_fidelity else {
+        return;
+    };
+    if package_fidelity.is_empty() {
+        return;
+    }
+    let fidelity_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_PACKAGE_FIDELITY_METADATA);
+    if let Ok(json) = serde_json::to_string(package_fidelity) {
+        fidelity_map.insert(txn, "data", Any::String(Arc::from(json.as_str())));
+    }
+}
+
+pub(super) fn hydrate_volatile_dependency_part(
+    workbook: &MapRef,
+    part: &Option<domain_types::VolatileDependencyPackagePart>,
+    txn: &mut yrs::TransactionMut,
+) {
+    let Some(part) = part else {
+        return;
+    };
+    if part.bytes.is_empty() {
+        return;
+    }
+    let part_map = crate::storage::ensure_workbook_child_map(
+        workbook,
+        txn,
+        KEY_VOLATILE_DEPENDENCY_PACKAGE_PART,
+    );
+    if let Ok(json) = serde_json::to_string(part) {
+        part_map.insert(txn, "data", Any::String(Arc::from(json.as_str())));
     }
 }
 
@@ -367,6 +614,52 @@ pub(super) fn hydrate_workbook_slicers(
     }
 }
 
+pub(super) fn hydrate_workbook_timelines(
+    workbook: &MapRef,
+    sheets: &[SheetData],
+    sheet_ids: &[SheetId],
+    timeline_caches: &[ooxml_types::timelines::TimelineCacheDef],
+    txn: &mut yrs::TransactionMut,
+) {
+    let cache_by_name: std::collections::HashMap<&str, &ooxml_types::timelines::TimelineCacheDef> =
+        timeline_caches
+            .iter()
+            .map(|cache| (cache.name.as_str(), cache))
+            .collect();
+
+    if sheets.iter().all(|sheet| sheet.timelines.is_empty()) {
+        return;
+    }
+
+    let timelines_map = crate::storage::ensure_workbook_child_map(workbook, txn, KEY_TIMELINES);
+    for (sheet_idx, sheet) in sheets.iter().enumerate() {
+        if sheet.timelines.is_empty() {
+            continue;
+        }
+
+        let sheet_hex = id_to_hex(sheet_ids[sheet_idx].as_u128());
+        let anchor_by_name: std::collections::HashMap<
+            &str,
+            &ooxml_types::timelines::TimelineAnchor,
+        > = sheet
+            .timeline_anchors
+            .iter()
+            .map(|anchor| (anchor.timeline_name.as_str(), anchor))
+            .collect();
+
+        for timeline in &sheet.timelines {
+            let cache = cache_by_name.get(timeline.cache.as_str()).copied();
+            let anchor = anchor_by_name.get(timeline.name.as_str()).copied();
+            let stored = domain_types::domain::slicer::xlsx_import_to_stored_timeline(
+                timeline, cache, anchor, &sheet_hex,
+            );
+            let json = serde_json::to_string(&stored)
+                .expect("StoredTimeline serialization should not fail");
+            timelines_map.insert(txn, &*stored.id, Any::String(Arc::from(json.as_str())));
+        }
+    }
+}
+
 /// Hydrate parsed pivot tables into the workbook-level pivotSpecs map.
 /// Stores `ParsedPivotTable` (JSON-serialized) so the export path can reconstruct them.
 /// TODO: Remove this — pivots will be stored per-sheet.
@@ -390,4 +683,36 @@ pub(super) fn hydrate_workbook_parsed_pivot_tables(
     // Note: PivotCacheSourceDef is no longer stored separately — cache info
     // is part of ParsedPivotTable.config (cache_id on PivotTableConfig,
     // field list on PivotTableConfig.fields — typed OOXML preservation).
+}
+
+pub(super) fn hydrate_workbook_pivot_cache_records(
+    workbook: &MapRef,
+    records: &domain_types::yrs_schema::pivot_cache_records::PivotCacheRecords,
+    txn: &mut yrs::TransactionMut,
+) {
+    if records.is_empty() {
+        return;
+    }
+    let records_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_PIVOT_CACHE_RECORDS);
+    let prelim = yrs_schema::pivot_cache_records::to_yrs_prelim(records);
+    for (key, value) in prelim {
+        records_map.insert(txn, &*key, value);
+    }
+}
+
+pub(super) fn hydrate_workbook_pivot_cache_sources(
+    workbook: &MapRef,
+    sources: &[domain_types::domain::pivot::PivotCacheSourceDef],
+    txn: &mut yrs::TransactionMut,
+) {
+    if sources.is_empty() {
+        return;
+    }
+    let sources_map =
+        crate::storage::ensure_workbook_child_map(workbook, txn, KEY_PIVOT_CACHE_SOURCES);
+    let prelim = yrs_schema::pivot_cache_records::sources_to_yrs_prelim(sources);
+    for (key, value) in prelim {
+        sources_map.insert(txn, &*key, value);
+    }
 }

@@ -3,7 +3,7 @@
 import type { BridgeTransport } from '@rust-bridge/client';
 import type { ComputeCore } from './compute-core';
 import type { A1CellRef, A1RangeRef, AutoExpansionResult, BatchCellInput, BatchRangeRequest, BatchRangeResponse, BridgeAutoFillRequest, BridgeFlashFillRequest, BridgeSortOptions, CFColorScale, CFDataBar, CFIconSetName, CFIconSetPreset, CFPresetCategory, CFRule, CacheInvalidationEventReason, Table as CanonicalTable, CellCFResult, CalculationSettings, ChartStatistics, Comment, CommentMention, CommentType, CellEdit, CellInput, CellPosition, CellPositionResult, CellInfo, CellStyleDef, CellMergeInfo, SheetPos, CellValidationResult, ColumnEdge, ColumnFilter, AdvancedFilterRequest, DynamicFilterRule, ConditionalFormat, CopyType, CreateBindingInput, CreateShapeConfig, DefaultFont, DefinedName, DefinedNameInput, DefinedNameWire, DisconnectionEventReason, DocumentProperties, FilterRecordCount, FilterSortState, FilterState, FormulaReferenceDiagnosticsOptions, FormulaReferenceDiagnosticsPage, FloatingObjectBounds, FlipAxis, FrozenPanes, GroupDefinition, IdentityCell, MergeRegion, MoveTarget, MutationResult, NameValidationResult, NamedRangeUpdate, OutlineLevel, OutlineLevelButton, OutlineRenderData, OutlineSettingsUpdate, OutlineSymbol, ProjectionData, ProtectedWorkbookOperation, RawCellData, RangeQueryResult, RangeSchema, RectBounds, RowEdge, RegexSearchOptions, RegexSearchResult, ResolvedMergedRegion, ResizeConfig, Scenario, ScenarioActiveState, ScenarioCreateInput, ScenarioUpdateInput, SelectionAggregates, SetCellsBatchResult, FloatingObject, SerializedFloatingObjectGroup, ShapeStyleUpdate, SheetDataBinding, FindInRangeOptions, FindInRangeResult, WorkbookSearchResult, SignCheckOptions, SignCheckResult, SheetGroupingConfig, SheetMeta, SheetProtectionConfig, SheetProtectionOptions, SheetScrollPosition, SheetSettings, SheetSnapshot, SheetViewOptions, SplitViewConfig, SlicerItem, StoredSlicer, StoredSlicerUpdate, SlicerCustomStyle, NamedSlicerStyle, CsvImportOptions, PivotFieldItems, PivotTableConfig, PivotTableResult, PivotField, HeaderFooterImageInfo, HfImagePosition, PrintRange, PrintSettings, PrintTitles, Sparkline, SparklineGroup, SparklineUpdate, SubtotalOptions, CustomTableStyleConfig, TableBoolOption, TableColumn, TableHitRegion, TableNameValidationResult, TableTopBottomFilter, TextToColumnsOptions, ThemeData, Transform, TotalsFunction, UndoState, UpdateBindingFields, RustWorkbookSettingsPatch, Viewport, WorkbookProtectionOptions, WorkbookComment, WorkbookPivotTable, WorkbookSettings, WorkbookTable, ZOrderEntry } from './compute-types.gen';
-import type { IdentityFormulaWire as IdentityFormula, ColumnSchemaWire as ColumnSchema, SchemaTypeWire as SchemaType, ValidationResultWire as ValidationResult, EditorTypeResolutionInputWire as EditorTypeResolutionInput, EditorTypeResolutionResultWire as EditorTypeResolutionResult, InferredSchemaWire as InferredSchema, NamedRangeDef, DataRow, Point, RegressionMethod, RegressionOptions, RegressionOutput, DensityResult, HistogramBin, StackInput, StackMode, StackOutput, FormatEntry, DateValueResult, ParsedDateInput, CFRuleWire, CfPresets, GoalSeekParams, GoalSeekResult, CreateDataTableInput, DataTableParams, DataTableResult, SchemaMapEntryWire, PageBreaks, TableRange, SlicerSortOrder, CFCellRange } from './types';
+import type { IdentityFormulaWire as IdentityFormula, ColumnSchemaWire as ColumnSchema, SchemaTypeWire as SchemaType, ValidationResultWire as ValidationResult, EditorTypeResolutionInputWire as EditorTypeResolutionInput, EditorTypeResolutionResultWire as EditorTypeResolutionResult, InferredSchemaWire as InferredSchema, NamedRangeDef, DataRow, Point, RegressionMethod, RegressionOptions, RegressionOutput, DensityResult, HistogramBin, StackInput, StackMode, StackOutput, FormatEntry, DateValueResult, ParsedDateInput, FormulaCircularReferenceValidation, CFRuleWire, CfPresets, GoalSeekParams, GoalSeekResult, CreateDataTableInput, DataTableParams, DataTableResult, SchemaMapEntryWire, PageBreaks, TableRange, SlicerSortOrder, CFCellRange } from './types';
 import type { Table, FilterCriteria, Slicer, SlicerCache, SortSpec, RowVisibility, TableCellFormat, TableStyleDef, StructuredRef, DynamicFilter, FilterDropdownData, TableStructureChange } from '@mog/table-engine';
 import type { CellFormat, CellValue, SheetId } from '@mog-sdk/contracts/core';
 import type { CellFormat as ResolvedCellFormat } from '@mog-sdk/contracts/core';
@@ -324,6 +324,7 @@ export interface GeneratedBridgeMethods {
   regexSearchAllSheets(options: RegexSearchOptions): Promise<WorkbookSearchResult>;
   signCheck(sheetId: SheetId, startRow: number, startCol: number, endRow: number, endCol: number, options: SignCheckOptions): Promise<SignCheckResult>;
   validateFormulaSyntax(sheetId: SheetId, formula: string): Promise<[string, number | null] | null>;
+  validateFormulaCircularReference(sheetId: SheetId, row: number, col: number, formula: string): Promise<FormulaCircularReferenceValidation | null>;
   evaluateExpression(sheetId: SheetId, expression: string): Promise<CellValue>;
   relocateCells(sheetId: SheetId, srcStartRow: number, srcStartCol: number, srcEndRow: number, srcEndCol: number, targetRow: number, targetCol: number): Promise<MutationResult>;
   insertCellsWithShift(sheetId: SheetId, row: number, col: number, rowCount: number, colCount: number, shiftRight: boolean): Promise<MutationResult>;
@@ -360,6 +361,7 @@ export interface GeneratedBridgeMethods {
   toggleFormatProperty(sheetId: SheetId, ranges: [number, number, number, number][], property: string, activeRow: number, activeCol: number): Promise<MutationResult>;
   setFormatForRanges(sheetId: SheetId, ranges: [number, number, number, number][], format: CellFormat): Promise<MutationResult>;
   clearFormatForRanges(sheetId: SheetId, ranges: [number, number, number, number][]): Promise<MutationResult>;
+  setCellPropertiesBatch(sheetId: SheetId, updates: [number, number, CellFormat][]): Promise<MutationResult>;
   addCfRule(sheetId: SheetId, rule: unknown): Promise<MutationResult>;
   updateCfRule(sheetId: SheetId, ruleId: string, updates: unknown): Promise<MutationResult>;
   deleteCfRule(sheetId: SheetId, ruleId: string): Promise<MutationResult>;
@@ -387,7 +389,6 @@ export interface GeneratedBridgeMethods {
   getColFormats(sheetId: SheetId, cols: number[]): Promise<[number, CellFormat | null][]>;
   setColFormats(sheetId: SheetId, updates: [number, CellFormat][]): Promise<MutationResult>;
   queryRangeProperties(sheetId: SheetId, startRow: number, startCol: number, endRow: number, endCol: number): Promise<(CellFormat | null)[][]>;
-  setCellPropertiesBatch(sheetId: SheetId, updates: [number, number, CellFormat][]): Promise<MutationResult>;
   getDisplayedCellProperties(sheetId: SheetId, row: number, col: number): Promise<CellFormat>;
   getDisplayedRangeProperties(sheetId: SheetId, startRow: number, startCol: number, endRow: number, endCol: number): Promise<CellFormat[][]>;
   getColumnSchema(sheetId: SheetId, colIndex: number): Promise<ColumnSchema | null>;
@@ -564,10 +565,6 @@ export interface GeneratedBridgeMethods {
   getFloatingObject(sheetId: SheetId, objectId: string): Promise<unknown | null>;
   getFloatingObjectsInSheet(sheetId: SheetId): Promise<[string, unknown][]>;
   deleteFloatingObject(sheetId: SheetId, objectId: string): Promise<MutationResult>;
-  setFloatingObjectGroup(sheetId: SheetId, groupId: string, json: unknown): Promise<MutationResult>;
-  getFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<unknown | null>;
-  getFloatingObjectGroupsInSheet(sheetId: SheetId): Promise<[string, unknown][]>;
-  deleteFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<MutationResult>;
   createFloatingObject(sheetId: SheetId, config: unknown): Promise<MutationResult>;
   updateFloatingObject(sheetId: SheetId, objectId: string, updates: unknown): Promise<MutationResult>;
   createShape(sheetId: SheetId, config: CreateShapeConfig): Promise<MutationResult>;
@@ -581,6 +578,14 @@ export interface GeneratedBridgeMethods {
   getFloatingObjectTyped(sheetId: SheetId, objectId: string): Promise<FloatingObject | null>;
   getAllFloatingObjectsTyped(sheetId: SheetId): Promise<FloatingObject[]>;
   computeAllObjectBounds(sheetId: SheetId): Promise<[string, FloatingObjectBounds][]>;
+  setFloatingObjectGroup(sheetId: SheetId, groupId: string, json: unknown): Promise<MutationResult>;
+  getFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<unknown | null>;
+  getFloatingObjectGroupsInSheet(sheetId: SheetId): Promise<[string, unknown][]>;
+  deleteFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<MutationResult>;
+  createFloatingObjectGroup(sheetId: SheetId, config: unknown): Promise<MutationResult>;
+  updateFloatingObjectGroup(sheetId: SheetId, groupId: string, updates: unknown): Promise<MutationResult>;
+  getFloatingObjectGroupTyped(sheetId: SheetId, groupId: string): Promise<SerializedFloatingObjectGroup | null>;
+  getAllFloatingObjectGroupsTyped(sheetId: SheetId): Promise<SerializedFloatingObjectGroup[]>;
   bringFloatingObjectToFront(sheetId: SheetId, objectId: string): Promise<MutationResult>;
   sendFloatingObjectToBack(sheetId: SheetId, objectId: string): Promise<MutationResult>;
   bringFloatingObjectForward(sheetId: SheetId, objectId: string): Promise<MutationResult>;
@@ -588,10 +593,6 @@ export interface GeneratedBridgeMethods {
   getFloatingObjectsInZOrder(sheetId: SheetId): Promise<FloatingObject[]>;
   getFloatingObjectMaxZIndex(sheetId: SheetId): Promise<number>;
   getFloatingObjectMinZIndex(sheetId: SheetId): Promise<number>;
-  createFloatingObjectGroup(sheetId: SheetId, config: unknown): Promise<MutationResult>;
-  updateFloatingObjectGroup(sheetId: SheetId, groupId: string, updates: unknown): Promise<MutationResult>;
-  getFloatingObjectGroupTyped(sheetId: SheetId, groupId: string): Promise<SerializedFloatingObjectGroup | null>;
-  getAllFloatingObjectGroupsTyped(sheetId: SheetId): Promise<SerializedFloatingObjectGroup[]>;
   getMaxZIndexAll(sheetId: SheetId): Promise<number>;
   getMinZIndexAll(sheetId: SheetId): Promise<number>;
   getAllInZOrder(sheetId: SheetId): Promise<ZOrderEntry[]>;
@@ -1896,6 +1897,10 @@ export class GeneratedBridgeBase implements GeneratedBridgeMethods {
     return this.core.query(this.core.transport.call<[string, number | null] | null>('compute_validate_formula_syntax', { docId: this.core.docId, sheetId, formula }));
   }
 
+  validateFormulaCircularReference(sheetId: SheetId, row: number, col: number, formula: string): Promise<FormulaCircularReferenceValidation | null> {
+    return this.core.query(this.core.transport.call<FormulaCircularReferenceValidation | null>('compute_validate_formula_circular_reference', { docId: this.core.docId, sheetId, row, col, formula }));
+  }
+
   evaluateExpression(sheetId: SheetId, expression: string): Promise<CellValue> {
     return this.core.query(this.core.transport.call<CellValue>('compute_evaluate_expression', { docId: this.core.docId, sheetId, expression }));
   }
@@ -2040,6 +2045,10 @@ export class GeneratedBridgeBase implements GeneratedBridgeMethods {
     return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_clear_format_for_ranges', { docId: this.core.docId, sheetId, ranges }));
   }
 
+  setCellPropertiesBatch(sheetId: SheetId, updates: [number, number, CellFormat][]): Promise<MutationResult> {
+    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_set_cell_properties_batch', { docId: this.core.docId, sheetId, updates }));
+  }
+
   addCfRule(sheetId: SheetId, rule: unknown): Promise<MutationResult> {
     return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_add_cf_rule', { docId: this.core.docId, sheetId, rule }));
   }
@@ -2146,10 +2155,6 @@ export class GeneratedBridgeBase implements GeneratedBridgeMethods {
 
   queryRangeProperties(sheetId: SheetId, startRow: number, startCol: number, endRow: number, endCol: number): Promise<(CellFormat | null)[][]> {
     return this.core.query(this.core.transport.call<(CellFormat | null)[][]>('compute_query_range_properties', { docId: this.core.docId, sheetId, startRow, startCol, endRow, endCol }));
-  }
-
-  setCellPropertiesBatch(sheetId: SheetId, updates: [number, number, CellFormat][]): Promise<MutationResult> {
-    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_set_cell_properties_batch', { docId: this.core.docId, sheetId, updates }));
   }
 
   getDisplayedCellProperties(sheetId: SheetId, row: number, col: number): Promise<CellFormat> {
@@ -2856,22 +2861,6 @@ export class GeneratedBridgeBase implements GeneratedBridgeMethods {
     return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_delete_floating_object', { docId: this.core.docId, sheetId, objectId }));
   }
 
-  setFloatingObjectGroup(sheetId: SheetId, groupId: string, json: unknown): Promise<MutationResult> {
-    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_set_floating_object_group', { docId: this.core.docId, sheetId, groupId, json }));
-  }
-
-  getFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<unknown | null> {
-    return this.core.query(this.core.transport.call<unknown | null>('compute_get_floating_object_group', { docId: this.core.docId, sheetId, groupId }));
-  }
-
-  getFloatingObjectGroupsInSheet(sheetId: SheetId): Promise<[string, unknown][]> {
-    return this.core.query(this.core.transport.call<[string, unknown][]>('compute_get_floating_object_groups_in_sheet', { docId: this.core.docId, sheetId }));
-  }
-
-  deleteFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<MutationResult> {
-    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_delete_floating_object_group', { docId: this.core.docId, sheetId, groupId }));
-  }
-
   createFloatingObject(sheetId: SheetId, config: unknown): Promise<MutationResult> {
     return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_create_floating_object', { docId: this.core.docId, sheetId, config }));
   }
@@ -2924,6 +2913,38 @@ export class GeneratedBridgeBase implements GeneratedBridgeMethods {
     return this.core.query(this.core.transport.call<[string, FloatingObjectBounds][]>('compute_compute_all_object_bounds', { docId: this.core.docId, sheetId }));
   }
 
+  setFloatingObjectGroup(sheetId: SheetId, groupId: string, json: unknown): Promise<MutationResult> {
+    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_set_floating_object_group', { docId: this.core.docId, sheetId, groupId, json }));
+  }
+
+  getFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<unknown | null> {
+    return this.core.query(this.core.transport.call<unknown | null>('compute_get_floating_object_group', { docId: this.core.docId, sheetId, groupId }));
+  }
+
+  getFloatingObjectGroupsInSheet(sheetId: SheetId): Promise<[string, unknown][]> {
+    return this.core.query(this.core.transport.call<[string, unknown][]>('compute_get_floating_object_groups_in_sheet', { docId: this.core.docId, sheetId }));
+  }
+
+  deleteFloatingObjectGroup(sheetId: SheetId, groupId: string): Promise<MutationResult> {
+    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_delete_floating_object_group', { docId: this.core.docId, sheetId, groupId }));
+  }
+
+  createFloatingObjectGroup(sheetId: SheetId, config: unknown): Promise<MutationResult> {
+    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_create_floating_object_group', { docId: this.core.docId, sheetId, config }));
+  }
+
+  updateFloatingObjectGroup(sheetId: SheetId, groupId: string, updates: unknown): Promise<MutationResult> {
+    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_update_floating_object_group', { docId: this.core.docId, sheetId, groupId, updates }));
+  }
+
+  getFloatingObjectGroupTyped(sheetId: SheetId, groupId: string): Promise<SerializedFloatingObjectGroup | null> {
+    return this.core.query(this.core.transport.call<SerializedFloatingObjectGroup | null>('compute_get_floating_object_group_typed', { docId: this.core.docId, sheetId, groupId }));
+  }
+
+  getAllFloatingObjectGroupsTyped(sheetId: SheetId): Promise<SerializedFloatingObjectGroup[]> {
+    return this.core.query(this.core.transport.call<SerializedFloatingObjectGroup[]>('compute_get_all_floating_object_groups_typed', { docId: this.core.docId, sheetId }));
+  }
+
   bringFloatingObjectToFront(sheetId: SheetId, objectId: string): Promise<MutationResult> {
     return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_bring_floating_object_to_front', { docId: this.core.docId, sheetId, objectId }));
   }
@@ -2950,22 +2971,6 @@ export class GeneratedBridgeBase implements GeneratedBridgeMethods {
 
   getFloatingObjectMinZIndex(sheetId: SheetId): Promise<number> {
     return this.core.query(this.core.transport.call<number>('compute_get_floating_object_min_z_index', { docId: this.core.docId, sheetId }));
-  }
-
-  createFloatingObjectGroup(sheetId: SheetId, config: unknown): Promise<MutationResult> {
-    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_create_floating_object_group', { docId: this.core.docId, sheetId, config }));
-  }
-
-  updateFloatingObjectGroup(sheetId: SheetId, groupId: string, updates: unknown): Promise<MutationResult> {
-    return this.core.mutate(this.core.transport.call<[Uint8Array, MutationResult]>('compute_update_floating_object_group', { docId: this.core.docId, sheetId, groupId, updates }));
-  }
-
-  getFloatingObjectGroupTyped(sheetId: SheetId, groupId: string): Promise<SerializedFloatingObjectGroup | null> {
-    return this.core.query(this.core.transport.call<SerializedFloatingObjectGroup | null>('compute_get_floating_object_group_typed', { docId: this.core.docId, sheetId, groupId }));
-  }
-
-  getAllFloatingObjectGroupsTyped(sheetId: SheetId): Promise<SerializedFloatingObjectGroup[]> {
-    return this.core.query(this.core.transport.call<SerializedFloatingObjectGroup[]>('compute_get_all_floating_object_groups_typed', { docId: this.core.docId, sheetId }));
   }
 
   getMaxZIndexAll(sheetId: SheetId): Promise<number> {

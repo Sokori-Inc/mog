@@ -12,7 +12,7 @@ use domain_types::{
     domain::filter::{AutoFilter, SortState},
     domain::floating_object::FloatingObject,
     domain::grouping::SheetGroupingConfig,
-    domain::hyperlink::Hyperlink,
+    domain::hyperlink::{Hyperlink, HyperlinkTargetKind},
     domain::outline::OutlineGroup,
     domain::print::PageBreaks,
     domain::protection::SheetProtection,
@@ -116,6 +116,14 @@ pub(in crate::storage::engine) fn export_hyperlinks_for_sheet(
                 .get("uid")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let target_kind = entry
+                .get("targetKind")
+                .and_then(|v| v.as_str())
+                .and_then(target_kind_from_str);
+            let target_mode = entry
+                .get("targetMode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             result.push(Hyperlink {
                 cell_ref,
                 target,
@@ -123,11 +131,21 @@ pub(in crate::storage::engine) fn export_hyperlinks_for_sheet(
                 display,
                 tooltip,
                 uid,
+                target_kind,
+                target_mode,
             });
         }
     }
 
     result
+}
+
+fn target_kind_from_str(value: &str) -> Option<HyperlinkTargetKind> {
+    match value {
+        "inlineLocation" => Some(HyperlinkTargetKind::InlineLocation),
+        "relationship" => Some(HyperlinkTargetKind::Relationship),
+        _ => None,
+    }
 }
 
 // -------------------------------------------------------------------
@@ -139,6 +157,17 @@ pub(in crate::storage::engine) fn export_dv_disable_prompts(
     stores: &EngineStores,
     sheet_id: &SheetId,
 ) -> bool {
+    export_meta_bool(stores, sheet_id, "dvDisablePrompts")
+}
+
+pub(in crate::storage::engine) fn export_x14_dv_disable_prompts(
+    stores: &EngineStores,
+    sheet_id: &SheetId,
+) -> bool {
+    export_meta_bool(stores, sheet_id, "x14DvDisablePrompts")
+}
+
+fn export_meta_bool(stores: &EngineStores, sheet_id: &SheetId, key: &str) -> bool {
     let sheet_hex = id_to_hex(sheet_id.as_u128());
     let doc = stores.storage.doc();
     let txn = doc.transact();
@@ -153,7 +182,7 @@ pub(in crate::storage::engine) fn export_dv_disable_prompts(
         _ => return false,
     };
 
-    match meta_map.get(&txn, "dvDisablePrompts") {
+    match meta_map.get(&txn, key) {
         Some(Out::Any(Any::Bool(b))) => b,
         _ => false,
     }
@@ -191,6 +220,17 @@ pub(in crate::storage::engine) fn export_dv_declared_count(
     stores: &EngineStores,
     sheet_id: &SheetId,
 ) -> Option<u32> {
+    export_meta_u32(stores, sheet_id, "dvDeclaredCount")
+}
+
+pub(in crate::storage::engine) fn export_x14_dv_declared_count(
+    stores: &EngineStores,
+    sheet_id: &SheetId,
+) -> Option<u32> {
+    export_meta_u32(stores, sheet_id, "x14DvDeclaredCount")
+}
+
+fn export_meta_u32(stores: &EngineStores, sheet_id: &SheetId, key: &str) -> Option<u32> {
     let sheet_hex = id_to_hex(sheet_id.as_u128());
     let doc = stores.storage.doc();
     let txn = doc.transact();
@@ -205,7 +245,7 @@ pub(in crate::storage::engine) fn export_dv_declared_count(
         _ => return None,
     };
 
-    match meta_map.get(&txn, "dvDeclaredCount") {
+    match meta_map.get(&txn, key) {
         Some(Out::Any(Any::BigInt(v))) if v >= 0 => Some(v as u32),
         Some(Out::Any(Any::Number(v))) if v.is_finite() && v >= 0.0 => Some(v as u32),
         _ => None,
@@ -217,6 +257,21 @@ pub(in crate::storage::engine) fn export_dv_declared_count(
 pub(in crate::storage::engine) fn export_data_validations_for_sheet(
     stores: &EngineStores,
     sheet_id: &SheetId,
+) -> Vec<ValidationSpec> {
+    export_validation_array(stores, sheet_id, "dataValidations")
+}
+
+pub(in crate::storage::engine) fn export_x14_data_validations_for_sheet(
+    stores: &EngineStores,
+    sheet_id: &SheetId,
+) -> Vec<ValidationSpec> {
+    export_validation_array(stores, sheet_id, "x14DataValidations")
+}
+
+fn export_validation_array(
+    stores: &EngineStores,
+    sheet_id: &SheetId,
+    key: &str,
 ) -> Vec<ValidationSpec> {
     let sheet_hex = id_to_hex(sheet_id.as_u128());
     let doc = stores.storage.doc();
@@ -232,7 +287,7 @@ pub(in crate::storage::engine) fn export_data_validations_for_sheet(
         _ => return vec![],
     };
 
-    match meta_map.get(&txn, "dataValidations") {
+    match meta_map.get(&txn, key) {
         Some(Out::YArray(arr)) => {
             let mut specs = Vec::new();
             for item in arr.iter(&txn) {
@@ -481,6 +536,8 @@ pub(in crate::storage::engine) fn export_floating_objects_for_sheet(
     Vec<FloatingObject>,
     Vec<ooxml_types::slicers::SlicerDef>,
     Vec<ooxml_types::slicers::SlicerAnchor>,
+    Vec<ooxml_types::timelines::TimelineDef>,
+    Vec<ooxml_types::timelines::TimelineAnchor>,
 ) {
     let sheet_hex = id_to_hex(sheet_id.as_u128());
     let doc = stores.storage.doc();
@@ -489,45 +546,47 @@ pub(in crate::storage::engine) fn export_floating_objects_for_sheet(
 
     let sheet_map = match sheets.get(&txn, &sheet_hex) {
         Some(Out::YMap(m)) => m,
-        _ => return (vec![], vec![], vec![]),
+        _ => return (vec![], vec![], vec![], vec![], vec![]),
     };
-    let fobj_map = match sheet_map.get(&txn, KEY_FLOATING_OBJECTS) {
-        Some(Out::YMap(m)) => m,
-        _ => return (vec![], vec![], vec![]),
-    };
-
     let mut floating_objects = Vec::new();
     let mut slicers = Vec::new();
     let mut slicer_anchors = Vec::new();
+    let mut timelines = Vec::new();
+    let mut timeline_anchors = Vec::new();
 
-    for (key, value) in sorted_map_entries(&fobj_map, &txn) {
-        if key.starts_with("slicer-anchor-") {
-            if let Out::Any(Any::String(json)) = value
-                && let Ok(sa) = serde_json::from_str::<ooxml_types::slicers::SlicerAnchor>(&json)
-            {
-                slicer_anchors.push(sa);
-            }
-        } else if key.starts_with("slicer-") {
-            if let Out::Any(Any::String(json)) = value
-                && let Ok(sl) = serde_json::from_str::<ooxml_types::slicers::SlicerDef>(&json)
-            {
-                slicers.push(sl);
-            }
-        } else if let Out::YMap(map) = value {
-            // Any non-slicer YMap entry is a floating object.  Keys may be
-            // `fobj-{ts}-{random}` (API-created) or the object's own ID such
-            // as `chart-import-{index}` (XLSX-imported).
-            if let Some(obj) = yrs_schema::floating_object::from_yrs_map(&map, &txn) {
-                floating_objects.push(obj);
+    if let Some(Out::YMap(fobj_map)) = sheet_map.get(&txn, KEY_FLOATING_OBJECTS) {
+        for (key, value) in sorted_map_entries(&fobj_map, &txn) {
+            if key.starts_with("slicer-anchor-") {
+                if let Out::Any(Any::String(json)) = value
+                    && let Ok(sa) =
+                        serde_json::from_str::<ooxml_types::slicers::SlicerAnchor>(&json)
+                {
+                    slicer_anchors.push(sa);
+                }
+            } else if key.starts_with("slicer-") {
+                if let Out::Any(Any::String(json)) = value
+                    && let Ok(sl) = serde_json::from_str::<ooxml_types::slicers::SlicerDef>(&json)
+                {
+                    slicers.push(sl);
+                }
+            } else if let Out::YMap(map) = value {
+                // Any non-slicer YMap entry is a floating object. Keys may be
+                // `fobj-{ts}-{random}` (API-created) or the object's own ID
+                // such as `chart-import-{index}` (XLSX-imported).
+                if let Some(obj) = yrs_schema::floating_object::from_yrs_map(&map, &txn) {
+                    floating_objects.push(obj);
+                }
             }
         }
     }
 
+    let workbook = stores.storage.workbook_map();
+
     // New format: read StoredSlicer entries from workbook slicers map,
     // filtered to this sheet.
     if slicers.is_empty() {
-        let workbook = stores.storage.workbook_map();
         if let Some(Out::YMap(slicers_map)) = workbook.get(&txn, KEY_SLICERS) {
+            let mut stored_slicers = Vec::new();
             for (_, value) in slicers_map.iter(&txn) {
                 if let Out::Any(Any::String(json_str)) = value
                     && let Ok(stored) = serde_json::from_str::<
@@ -535,20 +594,49 @@ pub(in crate::storage::engine) fn export_floating_objects_for_sheet(
                     >(&json_str)
                     && sheet_hex == stored.sheet_id
                 {
-                    slicers.push(domain_types::domain::slicer::stored_slicer_to_slicer_def(
-                        &stored,
-                    ));
-                    if let Some(anchor) =
-                        domain_types::domain::slicer::stored_slicer_to_anchor(&stored)
-                    {
-                        slicer_anchors.push(anchor);
-                    }
+                    stored_slicers.push(stored);
+                }
+            }
+            stored_slicers.sort_by(|a, b| a.z_index.cmp(&b.z_index).then_with(|| a.id.cmp(&b.id)));
+            for stored in stored_slicers {
+                slicers.push(domain_types::domain::slicer::stored_slicer_to_slicer_def(
+                    &stored,
+                ));
+                if let Some(anchor) = domain_types::domain::slicer::stored_slicer_to_anchor(&stored)
+                {
+                    slicer_anchors.push(anchor);
                 }
             }
         }
     }
 
-    (floating_objects, slicers, slicer_anchors)
+    if let Some(Out::YMap(timelines_map)) = workbook.get(&txn, KEY_TIMELINES) {
+        let mut stored_timelines = Vec::new();
+        for (_, value) in timelines_map.iter(&txn) {
+            if let Out::Any(Any::String(json_str)) = value
+                && let Ok(stored) =
+                    serde_json::from_str::<domain_types::domain::slicer::StoredTimeline>(&json_str)
+                && sheet_hex == stored.sheet_id
+            {
+                stored_timelines.push(stored);
+            }
+        }
+        stored_timelines.sort_by(|a, b| a.z_index.cmp(&b.z_index).then_with(|| a.id.cmp(&b.id)));
+        for stored in stored_timelines {
+            timelines.push(domain_types::domain::slicer::stored_timeline_to_timeline_def(&stored));
+            if let Some(anchor) = domain_types::domain::slicer::stored_timeline_to_anchor(&stored) {
+                timeline_anchors.push(anchor);
+            }
+        }
+    }
+
+    (
+        floating_objects,
+        slicers,
+        slicer_anchors,
+        timelines,
+        timeline_anchors,
+    )
 }
 
 // -------------------------------------------------------------------

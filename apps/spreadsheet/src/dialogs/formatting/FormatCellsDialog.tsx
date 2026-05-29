@@ -49,6 +49,7 @@ import {
   type ProtectionTabRef,
 } from './format-cells';
 import { NumberFormatPanel } from './NumberFormatPanel';
+import type { FormatCellsTabId } from '../../ui-store/slices/core/misc';
 
 // =============================================================================
 // Types
@@ -56,7 +57,7 @@ import { NumberFormatPanel } from './NumberFormatPanel';
 
 // No props needed - dialog subscribes to its own open state from UIStore
 
-type TabId = 'number' | 'alignment' | 'font' | 'border' | 'fill' | 'protection';
+type TabId = FormatCellsTabId;
 
 // =============================================================================
 // Component
@@ -66,6 +67,7 @@ export function FormatCellsDialog() {
   // Dialog subscribes to its own open state - prevents SpreadsheetContent from re-rendering
   // when this dialog opens/closes (render isolation per ARCHITECTURE-CHECKLIST.md Section 14)
   const open = useUIStore((s) => s.formatCellsDialogOpen);
+  const initialTab = useUIStore((s) => s.formatCellsDialogInitialTab);
   const deps = useActionDependencies();
   const wb = useWorkbook();
   const recentFormats = useUIStore((s) => s.recentNumberFormats);
@@ -77,7 +79,8 @@ export function FormatCellsDialog() {
   const setPendingFillFormat = useUIStore((s) => s.setPendingFillFormat);
   const setPendingProtectionFormat = useUIStore((s) => s.setPendingProtectionFormat);
 
-  const [activeTab, setActiveTab] = useState<TabId>('number');
+  const effectiveInitialTab = initialTab ?? 'number';
+  const [activeTab, setActiveTab] = useState<TabId>(effectiveInitialTab);
 
   // Recent colors from localStorage for color pickers
   const [recentFontColors, setRecentFontColors] = useState(() => getRecentColors('font'));
@@ -132,8 +135,11 @@ export function FormatCellsDialog() {
   // on the header close button, swallowing the first arrow keystroke.
   const numberCategoryListboxRef = useRef<HTMLDivElement | null>(null);
 
-  // Track pending format for Number tab (legacy pattern - handled inline)
   const pendingNumberFormatRef = useRef<{ format: string; type: NumberFormatType } | null>(null);
+  const [pendingNumberFormat, setPendingNumberFormatDraft] = useState<{
+    format: string;
+    type: NumberFormatType;
+  } | null>(null);
 
   // Get current selection for initial format values
   // PERFORMANCE: Use granular hook - only subscribe to activeCell, not full selection
@@ -152,9 +158,11 @@ export function FormatCellsDialog() {
 
   useEffect(() => {
     if (open) {
+      setActiveTab(effectiveInitialTab);
       pendingNumberFormatRef.current = null;
+      setPendingNumberFormatDraft(null);
     }
-  }, [open]);
+  }, [open, effectiveInitialTab]);
 
   useEffect(() => {
     if (!open) return;
@@ -254,11 +262,9 @@ export function FormatCellsDialog() {
   const applyActiveTabChanges = async (): Promise<boolean> => {
     switch (activeTab) {
       case 'number': {
-        if (
-          pendingNumberFormatRef.current &&
-          pendingNumberFormatRef.current.format !== currentNumberFormat
-        ) {
-          setPendingNumberFormat(pendingNumberFormatRef.current.format);
+        const draft = pendingNumberFormatRef.current ?? pendingNumberFormat;
+        if (draft && draft.format !== currentNumberFormat) {
+          setPendingNumberFormat(draft.format);
           const result = await dispatch('APPLY_NUMBER_FORMAT', deps);
           if (result.handled === false) return false;
         }
@@ -345,7 +351,9 @@ export function FormatCellsDialog() {
    */
   const handleNumberFormatChange = useCallback(
     (formatCode: string, formatType: NumberFormatType) => {
-      pendingNumberFormatRef.current = { format: formatCode, type: formatType };
+      const draft = { format: formatCode, type: formatType };
+      pendingNumberFormatRef.current = draft;
+      setPendingNumberFormatDraft(draft);
     },
     [],
   );
@@ -424,6 +432,7 @@ export function FormatCellsDialog() {
               <>
                 <TabPanel tabId="number">
                   <NumberFormatPanel
+                    variant="embedded"
                     currentFormat={currentNumberFormat}
                     currentType={currentNumberFormatType}
                     sampleValue={sampleValue}

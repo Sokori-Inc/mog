@@ -11,12 +11,15 @@
 mod error;
 pub use error::*;
 
+mod array_lift;
 mod excel_function;
+mod registered_function;
 mod registry;
 pub mod signature;
 mod trait_def;
 
 pub use excel_function::ExcelFunction;
+pub use registered_function::RegisteredFunction;
 pub use registry::FunctionRegistry;
 pub use signature::{ArgRole, ArgSpec, FunctionSignature, VariadicSpec};
 pub use trait_def::PureFunction;
@@ -58,3 +61,4 @@ pub(crate) mod lookup;
 pub(crate) mod math;
 pub(crate) mod statistical;
 pub(crate) mod text;
+pub(crate) mod web;

@@ -67,7 +67,7 @@ fn exported_ref_by_author<'a>(comments: &'a [Comment], author: &str) -> &'a str 
 #[test]
 fn l2_preserves_empty_comment_anchor_identity_without_data_cells() {
     let input = fixture_parse_output();
-    let input_bytes = write_xlsx_from_parse_output(&input, None).expect("write input xlsx");
+    let input_bytes = write_xlsx_from_parse_output(&input).expect("write input xlsx");
 
     let (engine, _) = YrsComputeEngine::from_xlsx_bytes(&input_bytes).expect("from_xlsx_bytes");
     let sheet_id = SheetId::from_uuid_str(
@@ -118,7 +118,7 @@ fn l2_preserves_empty_comment_anchor_identity_without_data_cells() {
     );
 
     let exported_bytes = engine.export_to_xlsx_bytes().expect("export_to_xlsx_bytes");
-    let (reparsed, _ctx, _diagnostics) =
+    let (reparsed, _diagnostics) =
         xlsx_parser::parse_xlsx_to_output(&exported_bytes).expect("parse exported xlsx");
     let reparsed_sheet = &reparsed.sheets[0];
     assert_eq!(

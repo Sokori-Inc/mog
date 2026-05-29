@@ -27,6 +27,7 @@ import {
   handled,
 } from './shared';
 import { applyCenterAcrossSelectionFormat } from './center-across-selection';
+import { autoFitRowsForBoundedRanges } from './row-autofit';
 
 // =============================================================================
 // Type Guards for Alignment Values
@@ -83,7 +84,13 @@ export const APPLY_ALIGNMENT_FORMAT: AsyncActionHandler = async (deps) => {
     if (result.handled && !result.error) {
       callUIStoreAction(deps, (state) => state.clearPendingAlignmentFormat());
       if (pendingAlignmentFormat.wrapText === true) {
-        await autoFitWrappedRows(deps, ranges);
+        await autoFitRowsForBoundedRanges(deps, ranges);
+      }
+      if (
+        typeof pendingAlignmentFormat.textRotation === 'number' &&
+        pendingAlignmentFormat.textRotation !== 0
+      ) {
+        await autoFitRowsForBoundedRanges(deps, ranges);
       }
     }
     return result;
@@ -101,7 +108,13 @@ export const APPLY_ALIGNMENT_FORMAT: AsyncActionHandler = async (deps) => {
 
   // Auto-fit affected rows when wrap-text is enabled (Excel behavior)
   if (pendingAlignmentFormat.wrapText === true) {
-    await autoFitWrappedRows(deps, ranges);
+    await autoFitRowsForBoundedRanges(deps, ranges);
+  }
+  if (
+    typeof pendingAlignmentFormat.textRotation === 'number' &&
+    pendingAlignmentFormat.textRotation !== 0
+  ) {
+    await autoFitRowsForBoundedRanges(deps, ranges);
   }
 
   return handled();
@@ -183,7 +196,10 @@ export const APPLY_PROTECTION_FORMAT: AsyncActionHandler = async (deps) => {
  * Section 16 Compliance: Dialog opening uses UIStore, not onUIAction.
  *
  */
-export const INSERT_TABLE: AsyncActionHandler = async (deps) => {
+export const INSERT_TABLE: AsyncActionHandler = async (
+  deps,
+  payload?: { stylePreset?: import('@mog-sdk/contracts/tables').TableStylePreset },
+) => {
   const sheetId = deps.getActiveSheetId();
   const { ranges } = getSelectionContext(deps);
   if (ranges.length === 0) {
@@ -195,7 +211,11 @@ export const INSERT_TABLE: AsyncActionHandler = async (deps) => {
 
   const uiState = getUIStore(deps).getState();
   if (uiState?.openInsertTableDialog) {
-    uiState.openInsertTableDialog({ range: target.range, hasHeaders: target.hasHeaders });
+    uiState.openInsertTableDialog({
+      range: target.range,
+      hasHeaders: target.hasHeaders,
+      ...(payload?.stylePreset ? { stylePreset: payload.stylePreset } : {}),
+    });
     return handled();
   }
   return { handled: false, reason: 'disabled' };
@@ -274,6 +294,10 @@ export const SET_TEXT_ROTATION: AsyncActionHandler = async (
     await ws.formats.setRanges(ranges, { textRotation: payload.rotation });
   }
 
+  if (payload.rotation !== 0) {
+    await autoFitRowsForBoundedRanges(deps, ranges);
+  }
+
   return handled();
 };
 
@@ -324,24 +348,3 @@ export const DECREASE_INDENT: AsyncActionHandler = async (deps) => {
 
   return handled();
 };
-
-async function autoFitWrappedRows(
-  deps: Parameters<AsyncActionHandler>[0],
-  ranges: readonly { startRow: number; endRow: number }[],
-): Promise<void> {
-  const activeSheetId = deps.getActiveSheetId();
-  const rowSet = new Set<number>();
-  for (const range of ranges) {
-    for (
-      let row = Math.min(range.startRow, range.endRow);
-      row <= Math.max(range.startRow, range.endRow);
-      row++
-    ) {
-      rowSet.add(row);
-    }
-  }
-  if (rowSet.size > 0) {
-    const activeWs = deps.workbook.getSheetById(activeSheetId);
-    await activeWs.layout.autoFitRows(Array.from(rowSet));
-  }
-}

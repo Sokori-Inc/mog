@@ -8,8 +8,12 @@
 //! - **x14** (`http://schemas.microsoft.com/office/spreadsheetml/2009/9/main`) — CT_Slicer, CT_SlicerCacheDefinition
 //! - **x15** (`http://schemas.microsoft.com/office/spreadsheetml/2010/11/main`) — CT_TableSlicerCache
 //! - **sle** (`http://schemas.microsoft.com/office/drawing/2010/slicer`) — slicer anchor in drawing XML
+//!
+//! These are shared vocabulary types for targeted x14/x15 support. Parser and
+//! writer modules own relationship closure, dirty invalidation, and any opaque
+//! extension payload replay.
 
-use crate::drawings::CellAnchor;
+use crate::drawings::{CellAnchor, DrawingAnchorMetadata, Extent};
 
 // ============================================================================
 // Content Type & Relationship Constants
@@ -235,6 +239,19 @@ pub struct SlicerTabularItem {
     pub s: bool,
     /// Whether the item has no data (default: false).
     pub nd: bool,
+    /// Unknown owner-local attributes on the item element.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_attrs: Vec<SlicerUnknownAttribute>,
+}
+
+/// Unknown owner-local slicer attribute.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerUnknownAttribute {
+    /// Attribute qualified name as imported.
+    pub name: String,
+    /// Decoded or verbatim attribute value.
+    pub value: String,
 }
 
 // ============================================================================
@@ -273,8 +290,41 @@ pub struct TableSlicerCache {
 pub struct SlicerAnchor {
     /// Slicer name (links back to `SlicerDef.name`).
     pub slicer_name: String,
+    /// Drawing object identity from `xdr:cNvPr/@id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<u32>,
     /// Top-left anchor position.
     pub from: CellAnchor,
     /// Bottom-right anchor position.
     pub to: CellAnchor,
+    /// Imported drawing anchor mode.
+    ///
+    /// Older callers only modeled two-cell slicer geometry.  This typed field
+    /// lets the file-IO owner preserve one-cell slicer controls without raw
+    /// drawing replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_mode: Option<SlicerAnchorMode>,
+    /// Object extent for one-cell anchors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<Extent>,
+    /// Optional `xdr:graphicFrame/@macro` attribute from the slicer frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_name: Option<String>,
+    /// Optional `xdr:cNvPr/a:extLst` XML from non-visual drawing properties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nv_ext_lst: Option<String>,
+    /// Metadata from the owning sheet drawing anchor.
+    #[serde(default, skip_serializing_if = "DrawingAnchorMetadata::is_empty")]
+    pub drawing: DrawingAnchorMetadata,
+}
+
+/// Drawing anchor mode for a slicer control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlicerAnchorMode {
+    /// `xdr:twoCellAnchor`.
+    #[default]
+    TwoCell,
+    /// `xdr:oneCellAnchor`.
+    OneCell,
 }

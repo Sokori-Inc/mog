@@ -8,8 +8,12 @@ use crate::snapshot::{
 use cell_types::{ColId, PayloadEncoding, RangeAnchor, RangeId, RangeKind, RowId};
 use domain_types::{
     AutoFilter, ParseOutput, SheetData, SheetDimensions, SortCondition, SortConditionBy, SortState,
+    domain::comment::{Comment, CommentType, PersonInfo},
+    domain::external_link::{ExternalLink, ImportedExternalLinkIdentity},
+    domain::workbook::{WorkbookView, WorkbookViewVisibility, WorkbookWebPublishing},
 };
 use formula_types::CellRef;
+use std::sync::Arc;
 use value_types::{CellValue, FiniteF64};
 
 fn worksheet_sort_state() -> SortState {
@@ -43,6 +47,7 @@ fn worksheet_sort_state_parse_output(include_nested_auto_filter_sort: bool) -> P
         columns: Vec::new(),
         sort: Some(nested_auto_filter_sort_state()),
         xr_uid: None,
+        ext_lst_raw: None,
     });
 
     ParseOutput {
@@ -70,14 +75,8 @@ fn assemble_engine_from_parse_output_storage(
     compute
         .init_from_snapshot_no_recalc(&mut mirror, workbook_snap.clone())
         .expect("compute init");
-    super::super::construction::assemble_engine(
-        storage,
-        mirror,
-        compute,
-        &workbook_snap,
-        Some(domain_types::RoundTripContext::default()),
-    )
-    .expect("assemble engine")
+    super::super::construction::assemble_engine(storage, mirror, compute, &workbook_snap)
+        .expect("assemble engine")
 }
 
 fn engine_from_parse_output_normal(output: &ParseOutput) -> YrsComputeEngine {
@@ -93,6 +92,770 @@ fn engine_from_parse_output_normal(output: &ParseOutput) -> YrsComputeEngine {
     );
 
     assemble_engine_from_parse_output_storage(storage, workbook_snap)
+}
+
+fn archive_entry_names(bytes: &[u8]) -> Vec<String> {
+    xlsx_parser::zip::XlsxArchive::new(bytes)
+        .expect("exported XLSX should be readable")
+        .entries()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+fn archive_text(bytes: &[u8], path: &str) -> Option<String> {
+    let archive =
+        xlsx_parser::zip::XlsxArchive::new(bytes).expect("exported XLSX should be readable");
+    archive
+        .read_file(path)
+        .ok()
+        .map(|bytes| String::from_utf8(bytes).expect("XML part should be UTF-8"))
+}
+
+fn assert_archive_has_entry_prefix(bytes: &[u8], prefix: &str) {
+    let names = archive_entry_names(bytes);
+    assert!(
+        names.iter().any(|name| name.starts_with(prefix)),
+        "expected an XLSX part under {prefix}; entries were {names:?}"
+    );
+}
+
+fn assert_archive_has_no_entry_prefix(bytes: &[u8], prefix: &str) {
+    let names = archive_entry_names(bytes);
+    assert!(
+        names.iter().all(|name| !name.starts_with(prefix)),
+        "no XLSX part under {prefix} should remain; entries were {names:?}"
+    );
+}
+
+fn picture_source_xlsx() -> Vec<u8> {
+    let (mut source, _) = YrsComputeEngine::from_snapshot(simple_snapshot()).unwrap();
+    let source_sheet_id = sheet_id();
+    let picture_config = serde_json::json!({
+        "type": "picture",
+        "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=",
+        "anchor": {
+            "anchorRow": 0,
+            "anchorCol": 0,
+            "anchorRowOffsetEmu": 0,
+            "anchorColOffsetEmu": 0,
+            "anchorMode": "oneCell",
+            "extentCxEmu": 1905000,
+            "extentCyEmu": 1428750
+        },
+        "width": 200.0,
+        "height": 150.0,
+        "visible": true,
+        "printable": true,
+        "flipH": false,
+        "flipV": false,
+        "opacity": 1.0,
+        "rotation": 0.0,
+        "name": "Owned Picture"
+    });
+    source
+        .create_floating_object(&source_sheet_id, &picture_config)
+        .expect("picture creation should succeed");
+    source
+        .export_to_xlsx_bytes()
+        .expect("source workbook with picture should export")
+}
+
+fn ole_owner_parse_output() -> ParseOutput {
+    use domain_types::domain::floating_object::{
+        AnchorMode, FloatingObject, FloatingObjectAnchor, FloatingObjectCommon, FloatingObjectData,
+        OleObjectData, OleObjectOoxmlProps, OleObjectPackageIdentity, OleObjectPreviewIdentity,
+    };
+
+    ParseOutput {
+        sheets: vec![SheetData {
+            name: "Ole".to_string(),
+            rows: 2,
+            cols: 2,
+            floating_objects: vec![FloatingObject {
+                common: FloatingObjectCommon {
+                    id: "ole-1".to_string(),
+                    sheet_id: "sheet-1".to_string(),
+                    anchor: FloatingObjectAnchor {
+                        anchor_mode: AnchorMode::TwoCell,
+                        end_row: Some(1),
+                        end_col: Some(1),
+                        ..Default::default()
+                    },
+                    width: 120.0,
+                    height: 80.0,
+                    name: "Owned OLE".to_string(),
+                    ..Default::default()
+                },
+                data: FloatingObjectData::OleObject(OleObjectData {
+                    prog_id: "Package".to_string(),
+                    dv_aspect: "DVASPECT_CONTENT".to_string(),
+                    is_linked: false,
+                    is_embedded: true,
+                    preview_image_src: Some("data:image/png;base64,iVBORw0KGgo=".to_string()),
+                    alt_text: Some("Owned OLE object".to_string()),
+                    ooxml: Some(OleObjectOoxmlProps {
+                        shape_id: 1025,
+                        r_id: Some("rIdOle1".to_string()),
+                        data_path: Some("xl/embeddings/oleObject1.bin".to_string()),
+                        name: Some("Owned OLE".to_string()),
+                        dv_aspect: "DVASPECT_CONTENT".to_string(),
+                        prog_id: "Package".to_string(),
+                        ole_update: "OLEUPDATE_ALWAYS".to_string(),
+                        preview_image_rel_id: Some("rIdPreview1".to_string()),
+                        preview_image_path: Some("xl/media/image1.png".to_string()),
+                        embedding: Some(OleObjectPackageIdentity {
+                            path: "xl/embeddings/oleObject1.bin".to_string(),
+                            kind: "oleObject".to_string(),
+                            content_type: None,
+                            relationship_id: Some("rIdOle1".to_string()),
+                            bytes: b"owned ole bytes".to_vec(),
+                        }),
+                        preview: Some(OleObjectPreviewIdentity {
+                            path: "xl/media/image1.png".to_string(),
+                            relationship_id: Some("rIdPreview1".to_string()),
+                            bytes: vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'],
+                        }),
+                        vml_drawing_path: Some("xl/drawings/vmlDrawing1.vml".to_string()),
+                        vml_relationship_id: Some("rIdVml1".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn shared_string_hints_survive_yrs_hydration_export() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 1,
+            cols: 1,
+            cells: vec![domain_types::CellData {
+                row: 0,
+                col: 0,
+                value: CellValue::Text(Arc::from("Rich")),
+                original_sst_index: Some(0),
+                original_value: Some("0".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        shared_string_hints: vec![domain_types::SharedStringHint {
+            index: 0,
+            text: "Rich".to_string(),
+            rich_text: Some(vec![domain_types::RichTextRun {
+                text: "Rich".to_string(),
+                bold: true,
+                ..Default::default()
+            }]),
+            phonetic_xml: None,
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.export_to_parse_output().unwrap().parse_output;
+
+    assert_eq!(exported.shared_string_hints, input.shared_string_hints);
+}
+
+#[test]
+fn imported_picture_survives_context_stripped_hydration_export_and_deletion_removes_parts() {
+    let source_xlsx = picture_source_xlsx();
+    let parsed = xlsx_api::parse(&source_xlsx)
+        .expect("source XLSX should parse")
+        .output;
+    assert_eq!(parsed.sheets[0].floating_objects.len(), 1);
+
+    let mut engine = engine_from_parse_output_normal(&parsed);
+    let hydrated_export = engine
+        .export_to_xlsx_bytes_context_stripped()
+        .expect("context-stripped export should succeed");
+    assert_archive_has_entry_prefix(&hydrated_export, "xl/media/");
+    assert_archive_has_entry_prefix(&hydrated_export, "xl/drawings/");
+    xlsx_parser::infra::package_integrity::validate_archive_package_integrity(
+        &xlsx_parser::zip::XlsxArchive::new(&hydrated_export).unwrap(),
+    )
+    .expect("hydrated picture export package graph should be valid");
+
+    let exported_parse = engine
+        .export_to_parse_output()
+        .expect("production parse output export should succeed")
+        .parse_output;
+    let object_id = exported_parse.sheets[0].floating_objects[0]
+        .common
+        .id
+        .clone();
+    let sheet_id_after_hydration =
+        SheetId::from_uuid_str(&engine.get_all_sheet_ids()[0]).expect("valid hydrated sheet id");
+    engine
+        .delete_floating_object(&sheet_id_after_hydration, &object_id)
+        .expect("picture owner deletion should succeed");
+
+    let deleted_export = engine
+        .export_to_xlsx_bytes_context_stripped()
+        .expect("context-stripped export after deletion should succeed");
+    assert_archive_has_no_entry_prefix(&deleted_export, "xl/media/");
+    assert_archive_has_no_entry_prefix(&deleted_export, "xl/drawings/");
+    let content_types = archive_text(&deleted_export, "[Content_Types].xml").unwrap();
+    assert!(!content_types.contains("/xl/media/"));
+    assert!(!content_types.contains("/xl/drawings/"));
+}
+
+#[test]
+fn modeled_ole_survives_context_stripped_hydration_export_and_deletion_removes_parts() {
+    let input = ole_owner_parse_output();
+    let mut engine = engine_from_parse_output_normal(&input);
+
+    let hydrated_export = engine
+        .export_to_xlsx_bytes_context_stripped()
+        .expect("context-stripped OLE export should succeed");
+    assert_archive_has_entry_prefix(&hydrated_export, "xl/embeddings/");
+    assert_archive_has_entry_prefix(&hydrated_export, "xl/drawings/");
+    assert_archive_has_entry_prefix(&hydrated_export, "xl/media/");
+    xlsx_parser::infra::package_integrity::validate_archive_package_integrity(
+        &xlsx_parser::zip::XlsxArchive::new(&hydrated_export).unwrap(),
+    )
+    .expect("hydrated OLE export package graph should be valid");
+
+    let exported_parse = engine
+        .export_to_parse_output()
+        .expect("production parse output export should succeed")
+        .parse_output;
+    let object_id = exported_parse.sheets[0].floating_objects[0]
+        .common
+        .id
+        .clone();
+    let sheet_id_after_hydration =
+        SheetId::from_uuid_str(&engine.get_all_sheet_ids()[0]).expect("valid hydrated sheet id");
+    engine
+        .delete_floating_object(&sheet_id_after_hydration, &object_id)
+        .expect("OLE owner deletion should succeed");
+
+    let deleted_export = engine
+        .export_to_xlsx_bytes_context_stripped()
+        .expect("context-stripped export after OLE deletion should succeed");
+    assert_archive_has_no_entry_prefix(&deleted_export, "xl/embeddings/");
+    assert_archive_has_no_entry_prefix(&deleted_export, "xl/media/");
+    assert_archive_has_no_entry_prefix(&deleted_export, "xl/drawings/");
+    let content_types = archive_text(&deleted_export, "[Content_Types].xml").unwrap();
+    assert!(!content_types.contains("/xl/embeddings/"));
+    assert!(!content_types.contains("/xl/media/"));
+    assert!(!content_types.contains("/xl/drawings/"));
+}
+
+#[test]
+fn workbook_stylesheet_survives_yrs_hydration_export() {
+    let mut input = ParseOutput::default();
+    input.sheets = vec![SheetData {
+        name: "Sheet1".to_string(),
+        ..Default::default()
+    }];
+    input.workbook_stylesheet = Some(domain_types::WorkbookStylesheet::from_stylesheet(
+        ooxml_types::styles::Stylesheet {
+            dxfs: vec![ooxml_types::styles::DxfDef {
+                font: Some(ooxml_types::styles::FontDef {
+                    bold: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            default_table_style: Some("TableStyleMedium4".to_string()),
+            ..Default::default()
+        },
+        vec![(
+            "x14".to_string(),
+            "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main".to_string(),
+        )],
+        Some(br#"<extLst><ext uri="{typed-style-ext}"/></extLst>"#.to_vec()),
+    ));
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert_eq!(exported.workbook_stylesheet, input.workbook_stylesheet);
+}
+
+#[test]
+fn pivot_cache_records_survive_yrs_hydration_export_without_context() {
+    let mut input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Data".to_string(),
+            rows: 3,
+            cols: 2,
+            cells: vec![
+                domain_types::CellData {
+                    row: 0,
+                    col: 0,
+                    value: CellValue::Text(Arc::from("Category")),
+                    ..Default::default()
+                },
+                domain_types::CellData {
+                    row: 0,
+                    col: 1,
+                    value: CellValue::Text(Arc::from("Amount")),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    input.pivot_cache_records.insert(
+        7,
+        vec![vec![
+            CellValue::Text(Arc::from("A")),
+            CellValue::Number(FiniteF64::new(42.0).unwrap()),
+        ]],
+    );
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert_eq!(exported.pivot_cache_records, input.pivot_cache_records);
+}
+
+#[test]
+fn pivot_cache_sources_survive_yrs_hydration_export_without_context() {
+    let mut input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Data".to_string(),
+            rows: 3,
+            cols: 2,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    input
+        .pivot_cache_sources
+        .push(domain_types::PivotCacheSourceDef {
+            cache_id: 7,
+            workbook_ref_scope: Default::default(),
+            source_kind: domain_types::domain::pivot::PivotCacheSourceKind::LocalWorksheet,
+            source_name: None,
+            source_sheet: Some("Data".to_string()),
+            source_range: Some("A1:B3".to_string()),
+            external_worksheet: None,
+            field_names: vec!["Category".to_string(), "Amount".to_string()],
+            shared_items: vec![
+                vec![CellValue::Text(Arc::from("A"))],
+                vec![CellValue::Number(FiniteF64::new(42.0).unwrap())],
+            ],
+        });
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert_eq!(exported.pivot_cache_sources, input.pivot_cache_sources);
+}
+
+#[test]
+fn modeled_export_does_not_recreate_absent_pivot_cache_records() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Data".to_string(),
+            rows: 1,
+            cols: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert!(exported.pivot_cache_records.is_empty());
+}
+
+#[test]
+fn sheet_protection_modern_hash_fields_survive_yrs_hydration_export() {
+    let protection = domain_types::SheetProtection {
+        is_protected: true,
+        password_hash: Some("CC2A".to_string()),
+        hash_value: Some("modernHash==".to_string()),
+        algorithm_name: Some("SHA-512".to_string()),
+        salt_value: Some("modernSalt==".to_string()),
+        spin_count: Some(100000),
+        select_locked: false,
+        select_unlocked: true,
+        format_cells: true,
+        ..Default::default()
+    };
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Protected".to_string(),
+            rows: 1,
+            cols: 1,
+            protection: Some(protection.clone()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.export_to_parse_output().unwrap().parse_output;
+
+    assert_eq!(exported.sheets[0].protection.as_ref(), Some(&protection));
+}
+
+#[test]
+fn explicit_empty_cached_formula_value_survives_yrs_hydration_export() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 1,
+            cols: 1,
+            cells: vec![domain_types::CellData {
+                row: 0,
+                col: 0,
+                value: CellValue::Null,
+                formula: Some("A2".to_string()),
+                has_empty_cached_value: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.export_to_parse_output().unwrap().parse_output;
+
+    let cell = exported.sheets[0]
+        .cells
+        .iter()
+        .find(|cell| cell.row == 0 && cell.col == 0)
+        .expect("formula cell should export");
+    assert_eq!(cell.formula.as_deref(), Some("A2"));
+    assert!(cell.has_empty_cached_value);
+}
+
+#[test]
+fn editing_formula_clears_explicit_empty_cached_value_metadata() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 1,
+            cols: 1,
+            cells: vec![domain_types::CellData {
+                row: 0,
+                col: 0,
+                value: CellValue::Null,
+                formula: Some("A2".to_string()),
+                has_empty_cached_value: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let mut engine = engine_from_parse_output_normal(&input);
+    let sheet_id = *engine
+        .stores
+        .grid_indexes
+        .keys()
+        .next()
+        .expect("sheet should exist");
+    let cell_id = engine
+        .stores
+        .grid_indexes
+        .get(&sheet_id)
+        .and_then(|grid| {
+            grid.cells()
+                .find_map(|(cell_id, row, col)| (row == 0 && col == 0).then_some(cell_id))
+        })
+        .expect("A1 cell id");
+
+    engine
+        .set_cell(
+            &sheet_id,
+            cell_id,
+            0,
+            0,
+            crate::bridge_types::CellInput::Parse { text: "=A3".into() },
+        )
+        .expect("formula edit should succeed");
+
+    let exported = engine.export_to_parse_output().unwrap().parse_output;
+    let cell = exported.sheets[0]
+        .cells
+        .iter()
+        .find(|cell| cell.row == 0 && cell.col == 0)
+        .expect("formula cell should export");
+    assert_eq!(cell.formula.as_deref(), Some("A3"));
+    assert!(!cell.has_empty_cached_value);
+}
+
+#[test]
+fn sheet_extent_survives_yrs_hydration_export_when_sheet_has_data() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 100,
+            cols: 26,
+            cells: vec![domain_types::CellData {
+                row: 0,
+                col: 0,
+                value: CellValue::Number(FiniteF64::new(1.0).unwrap()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine.export_to_parse_output().unwrap().parse_output;
+
+    assert_eq!(exported.sheets[0].rows, 100);
+    assert_eq!(exported.sheets[0].cols, 26);
+}
+
+#[test]
+fn build_parse_output_from_yrs_preserves_xlsx_metadata_domain() {
+    let mut output = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    output.metadata = Some(domain_types::WorkbookMetadata {
+        metadata_types: vec![domain_types::MetadataType {
+            name: "XLDAPR".to_string(),
+            min_supported_version: 120000,
+            copy: true,
+            paste_all: true,
+            paste_values: true,
+            merge: true,
+            split_first: true,
+            row_col_shift: true,
+            clear_formats: true,
+            clear_comments: true,
+            assign: true,
+            coerce: true,
+            cell_meta: true,
+            ..Default::default()
+        }],
+        future_metadata: vec![domain_types::FutureMetadataGroup {
+            name: "XLDAPR".to_string(),
+            blocks: vec![domain_types::FutureMetadataBlock {
+                raw_xml: r#"<xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/>"#.to_string(),
+            }],
+        }],
+        cell_metadata: vec![domain_types::CellMetadataBlock {
+            records: vec![domain_types::CellMetadataRecord { t: 1, v: 0 }],
+        }],
+        value_metadata: vec![],
+        rich_data: None,
+        imported_metadata_xml: None,
+        feature_properties: Default::default(),
+    });
+
+    let engine = engine_from_parse_output_normal(&output);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert_eq!(exported.metadata, output.metadata);
+}
+
+#[test]
+fn l2_xlsx_export_preserves_threaded_comment_persons() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Comments".to_string(),
+            rows: 1,
+            cols: 1,
+            cells: vec![domain_types::CellData {
+                row: 0,
+                col: 0,
+                value: CellValue::Text("threaded".into()),
+                ..Default::default()
+            }],
+            comments: vec![Comment {
+                id: "comment-1".to_string(),
+                cell_ref: "A1".to_string(),
+                author: "Modeled Author".to_string(),
+                author_id: Some("S::author@example.com::1".to_string()),
+                content: Some("Threaded package comment".to_string()),
+                thread_id: Some("{THREAD-1}".to_string()),
+                person_id: Some("{PERSON-1}".to_string()),
+                timestamp: Some("2026-05-27T10:00:00Z".to_string()),
+                comment_type: CommentType::ThreadedComment,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        persons: vec![PersonInfo {
+            id: "{PERSON-1}".to_string(),
+            display_name: "Modeled Author".to_string(),
+            user_id: Some("S::author@example.com::1".to_string()),
+            provider_id: Some("AD".to_string()),
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported_parse = engine
+        .export_to_parse_output()
+        .expect("production Yrs export should succeed")
+        .parse_output;
+    assert_eq!(exported_parse.persons, input.persons);
+
+    let exported_bytes = engine.export_to_xlsx_bytes().expect("export xlsx bytes");
+    let parsed = xlsx_api::parse(&exported_bytes)
+        .expect("exported XLSX should parse")
+        .output;
+
+    assert_eq!(parsed.persons.len(), 1);
+    assert_eq!(parsed.persons[0].id, "{PERSON-1}");
+    assert_eq!(parsed.persons[0].display_name, "Modeled Author");
+    assert!(parsed.sheets[0].comments.iter().any(|comment| {
+        comment.comment_type == CommentType::ThreadedComment
+            && comment.thread_id.as_deref() == Some("{THREAD-1}")
+            && comment.person_id.as_deref() == Some("{PERSON-1}")
+            && comment.content.as_deref() == Some("Threaded package comment")
+            && comment.author == "Modeled Author"
+    }));
+}
+
+#[test]
+fn l2_xlsx_export_preserves_empty_threaded_comment_persons_part() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Comments".to_string(),
+            rows: 1,
+            cols: 1,
+            ..Default::default()
+        }],
+        has_persons_part: true,
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported_parse = engine
+        .export_to_parse_output()
+        .expect("production Yrs export should succeed")
+        .parse_output;
+    assert!(exported_parse.has_persons_part);
+    assert!(exported_parse.persons.is_empty());
+
+    let exported_bytes = engine.export_to_xlsx_bytes().expect("export xlsx bytes");
+    let parsed = xlsx_api::parse(&exported_bytes)
+        .expect("exported XLSX should parse")
+        .output;
+
+    assert!(parsed.has_persons_part);
+    assert!(parsed.persons.is_empty());
+}
+
+#[test]
+fn build_parse_output_from_yrs_preserves_workbook_views() {
+    let output = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            ..Default::default()
+        }],
+        workbook_views: vec![WorkbookView {
+            active_tab: 8,
+            first_sheet: 3,
+            visibility: WorkbookViewVisibility::Visible,
+            minimized: false,
+            show_horizontal_scroll: true,
+            show_vertical_scroll: true,
+            show_sheet_tabs: true,
+            auto_filter_date_grouping: true,
+            x_window: Some(0),
+            y_window: Some(0),
+            window_width: Some(28800),
+            window_height: Some(12225),
+            tab_ratio: Some(600.0),
+            uid: Some("{1A2B3C4D-0000-0000-0000-000000000000}".to_string()),
+            ext_lst_raw: None,
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&output);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert_eq!(exported.workbook_views, output.workbook_views);
+}
+
+#[test]
+fn build_parse_output_from_yrs_preserves_workbook_web_publishing() {
+    let output = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Web".to_string(),
+            rows: 1,
+            cols: 1,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        web_publishing: Some(WorkbookWebPublishing {
+            css: Some(true),
+            thicket: Some(false),
+            long_file_names: Some(true),
+            vml: Some(false),
+            allow_png: Some(true),
+            target_screen_size: Some(ooxml_types::web_publish::TargetScreenSize::Size1600x1200),
+            dpi: Some(192),
+            code_page: None,
+            character_set: None,
+        }),
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&output);
+    let exported = engine.build_parse_output_from_yrs();
+
+    assert_eq!(exported.web_publishing, output.web_publishing);
+}
+
+#[test]
+fn build_parse_output_from_yrs_preserves_imported_array_refs() {
+    let cell_formula = ooxml_types::worksheet::CellFormula {
+        t: ooxml_types::worksheet::CellFormulaType::Array,
+        r#ref: Some("A1:A3".to_string()),
+        text: "_xlfn.SEQUENCE(3)".to_string(),
+        aca: true,
+        ..Default::default()
+    };
+    let output = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 10,
+            cols: 4,
+            cells: vec![domain_types::CellData {
+                row: 0,
+                col: 0,
+                value: CellValue::Text("first".into()),
+                formula: Some("_xlfn.SEQUENCE(3)".to_string()),
+                array_ref: Some("A1:A3".to_string()),
+                cell_formula: Some(cell_formula.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&output);
+    let exported = engine.build_parse_output_from_yrs();
+    let cell = exported.sheets[0]
+        .cells
+        .iter()
+        .find(|cell| cell.row == 0 && cell.col == 0)
+        .expect("exported array formula anchor");
+
+    assert_eq!(cell.formula.as_deref(), Some("SEQUENCE(3)"));
+    assert_eq!(cell.array_ref.as_deref(), Some("A1:A3"));
+    assert_eq!(cell.cell_formula.as_ref(), Some(&cell_formula));
 }
 
 fn engine_from_parse_output_with_ranges(output: &ParseOutput) -> YrsComputeEngine {
@@ -417,6 +1180,132 @@ fn range_export_snapshot() -> WorkbookSnapshot {
     }
 }
 
+#[test]
+fn xlsx_export_calculation_settings_use_modeled_storage() {
+    let mut input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 1,
+            cols: 1,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    input.calculation.calc_mode = domain_types::domain::workbook::CalcMode::Manual;
+    input.calculation.iterate = true;
+    input.calculation.iterate_count = 42;
+    input.calculation.iterate_delta = 0.25;
+    input.calculation.calc_id = Some(191029);
+
+    let input_bytes = xlsx_api::export_from_parse_output(&input).expect("write input xlsx");
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(simple_snapshot()).unwrap();
+    engine
+        .import_from_xlsx_bytes(&input_bytes, false)
+        .expect("import xlsx bytes");
+
+    engine
+        .set_calculation_mode("auto")
+        .expect("set modeled calculation mode");
+    engine
+        .set_iterative_calculation(false)
+        .expect("set modeled iterative calculation");
+
+    let exported = engine
+        .export_to_parse_output()
+        .expect("export_to_parse_output")
+        .parse_output;
+
+    assert_eq!(
+        exported.calculation.calc_mode,
+        domain_types::domain::workbook::CalcMode::Auto
+    );
+    assert!(!exported.calculation.iterate);
+    assert_eq!(exported.calculation.iterate_count, 42);
+    assert_eq!(exported.calculation.calc_id, Some(0));
+    assert!(!exported.calculation.full_calc_on_load);
+    assert!(!exported.calculation.force_full_calc);
+    assert!(exported.calculation.calc_completed);
+}
+
+fn imported_external_link() -> ExternalLink {
+    ExternalLink {
+        id: "1".to_string(),
+        file_path: Some("Book2.xlsx".to_string()),
+        imported_identity: Some(ImportedExternalLinkIdentity {
+            excel_ordinal: 1,
+            workbook_rel_id: "rId20".to_string(),
+            part_name: "externalLinks/externalLink9.xml".to_string(),
+            external_book_rid: Some("rId1".to_string()),
+            target: Some("externalLinks/externalLink9.xml".to_string()),
+            target_mode: None,
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn imported_external_links_export_from_modeled_storage() {
+    let mut input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 1,
+            cols: 1,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    input.external_links = vec![imported_external_link()];
+
+    let input_bytes = xlsx_api::export_from_parse_output(&input).expect("write input xlsx");
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(simple_snapshot()).unwrap();
+    engine
+        .import_from_xlsx_bytes(&input_bytes, false)
+        .expect("import xlsx bytes");
+
+    let exported = engine
+        .export_to_parse_output()
+        .expect("export_to_parse_output")
+        .parse_output;
+
+    assert_eq!(exported.external_links.len(), 1);
+    assert_eq!(
+        exported.external_links[0].file_path.as_deref(),
+        Some("Book2.xlsx")
+    );
+    assert_eq!(
+        exported.external_links[0]
+            .imported_identity
+            .as_ref()
+            .map(|identity| identity.workbook_rel_id.as_str()),
+        Some("rId20")
+    );
+}
+
+#[test]
+fn absent_modeled_external_links_do_not_export_external_references() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Sheet1".to_string(),
+            rows: 1,
+            cols: 1,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let engine = engine_from_parse_output_normal(&input);
+
+    let exported_bytes = engine.export_to_xlsx_bytes().expect("export xlsx bytes");
+    let parsed = xlsx_api::parse(&exported_bytes).expect("parse exported xlsx");
+
+    assert!(
+        parsed.output.external_links.is_empty(),
+        "absent modeled external links must not create workbook externalReferences"
+    );
+}
+
 fn exported_cell_map(
     engine: &YrsComputeEngine,
 ) -> std::collections::HashMap<(u32, u32), domain_types::CellData> {
@@ -497,6 +1386,112 @@ fn range_backed_defined_name_exports_without_virtual_cell_ref() {
     assert_eq!(
         exported.named_ranges[0].refers_to,
         "'Proppant Inventory'!$A$374:$H$377"
+    );
+}
+
+#[test]
+fn hidden_imported_defined_name_exports_from_modeled_storage() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Names".to_string(),
+            rows: 10,
+            cols: 4,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        named_ranges: vec![domain_types::NamedRange {
+            name: "_xlnm._FilterDatabase".to_string(),
+            refers_to: "Names!$A$1:$B$4".to_string(),
+            local_sheet_id: Some(0),
+            hidden: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine
+        .export_to_parse_output()
+        .expect("hidden defined-name export should succeed")
+        .parse_output;
+
+    assert_eq!(exported.named_ranges.len(), 1);
+    assert_eq!(exported.named_ranges[0].name, "_xlnm._FilterDatabase");
+    assert_eq!(exported.named_ranges[0].refers_to, "Names!$A$1:$B$4");
+    assert_eq!(exported.named_ranges[0].local_sheet_id, Some(0));
+    assert!(exported.named_ranges[0].hidden);
+}
+
+#[test]
+fn workbook_scoped_broken_defined_name_exports_from_modeled_storage() {
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Names".to_string(),
+            rows: 10,
+            cols: 4,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        named_ranges: vec![domain_types::NamedRange {
+            name: "LegacyInput".to_string(),
+            refers_to: "#REF!".to_string(),
+            local_sheet_id: None,
+            hidden: false,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let engine = engine_from_parse_output_normal(&input);
+    let exported = engine
+        .export_to_parse_output()
+        .expect("broken workbook-scoped defined-name export should succeed")
+        .parse_output;
+
+    assert_eq!(exported.named_ranges.len(), 1);
+    assert_eq!(exported.named_ranges[0].name, "LegacyInput");
+    assert_eq!(exported.named_ranges[0].refers_to, "#REF!");
+    assert_eq!(exported.named_ranges[0].local_sheet_id, None);
+    assert!(!exported.named_ranges[0].hidden);
+}
+
+#[test]
+fn deleted_named_ranges_do_not_resurrect_on_export() {
+    let stale_name = domain_types::NamedRange {
+        name: "ToDelete".to_string(),
+        refers_to: "Names!$A$1".to_string(),
+        ..Default::default()
+    };
+    let input = ParseOutput {
+        sheets: vec![SheetData {
+            name: "Names".to_string(),
+            rows: 10,
+            cols: 4,
+            dimensions: SheetDimensions::default(),
+            ..Default::default()
+        }],
+        named_ranges: vec![stale_name.clone()],
+        ..Default::default()
+    };
+    let mut engine = engine_from_parse_output_normal(&input);
+    let id = engine
+        .get_named_ranges_by_scope(None)
+        .into_iter()
+        .find(|name| name.name == "ToDelete")
+        .expect("imported name should exist")
+        .id;
+    engine
+        .remove_named_range_by_id(&id)
+        .expect("remove imported name");
+
+    let exported = engine
+        .export_to_parse_output()
+        .expect("defined-name export should succeed")
+        .parse_output;
+
+    assert!(
+        exported.named_ranges.is_empty(),
+        "modeled deletion must control defined-name export"
     );
 }
 
@@ -610,7 +1605,7 @@ fn worksheet_sort_state_survives_range_aware_parse_output_hydration_export() {
 #[test]
 fn worksheet_sort_state_l2_xlsx_export_keeps_standalone_distinct_from_autofilter_sort() {
     let input = worksheet_sort_state_parse_output(true);
-    let input_bytes = xlsx_api::export_from_parse_output(&input, None).expect("write input xlsx");
+    let input_bytes = xlsx_api::export_from_parse_output(&input).expect("write input xlsx");
 
     let (mut engine, _) = YrsComputeEngine::from_snapshot(simple_snapshot()).unwrap();
     engine

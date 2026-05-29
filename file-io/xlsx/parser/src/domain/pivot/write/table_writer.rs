@@ -5,6 +5,7 @@
 
 use super::types::*;
 use crate::write::xml_writer::XmlWriter;
+use domain_types::domain::pivot::{PivotRawXmlAttribute, PivotTableOoxmlPreservation};
 
 /// SpreadsheetML namespace URI
 const SPREADSHEETML_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -42,6 +43,28 @@ pub struct PivotTableWriter {
     pub data_on_rows: bool,
     /// Data caption
     pub data_caption: String,
+    /// Custom label for grand total rows/columns.
+    pub grand_total_caption: Option<String>,
+    /// Custom row header caption.
+    pub row_header_caption: Option<String>,
+    /// Custom column header caption.
+    pub col_header_caption: Option<String>,
+    /// Whether row grand totals are shown.
+    pub row_grand_totals: bool,
+    /// Whether column grand totals are shown.
+    pub col_grand_totals: bool,
+    /// Whether classic grid drop zones are enabled.
+    pub grid_drop_zones: bool,
+    /// Caption shown for error values.
+    pub error_caption: Option<String>,
+    /// Whether error captions are displayed.
+    pub show_error: bool,
+    /// Caption shown for missing values.
+    pub missing_caption: Option<String>,
+    /// Whether missing captions are displayed.
+    pub show_missing: bool,
+    /// Writer-only preservation state for unsupported imported pivot XML.
+    pub ooxml_preservation: PivotTableOoxmlPreservation,
 }
 
 impl PivotTableWriter {
@@ -61,6 +84,17 @@ impl PivotTableWriter {
             style: None,
             data_on_rows: false,
             data_caption: "Values".to_string(),
+            grand_total_caption: None,
+            row_header_caption: None,
+            col_header_caption: None,
+            row_grand_totals: true,
+            col_grand_totals: true,
+            grid_drop_zones: false,
+            error_caption: None,
+            show_error: false,
+            missing_caption: None,
+            show_missing: true,
+            ooxml_preservation: PivotTableOoxmlPreservation::default(),
         }
     }
 
@@ -142,23 +176,57 @@ impl PivotTableWriter {
         // Start pivotTableDefinition
         w.start_element("pivotTableDefinition")
             .attr("xmlns", SPREADSHEETML_NS)
+            .apply_preserved_attrs(
+                &self.ooxml_preservation.root_namespace_declarations,
+                &["xmlns"],
+            )
             .attr("name", &self.name)
             .attr_num("cacheId", self.cache_id)
             .attr_bool("dataOnRows", self.data_on_rows)
-            .attr_bool("applyNumberFormats", false)
-            .attr_bool("applyBorderFormats", false)
-            .attr_bool("applyFontFormats", false)
-            .attr_bool("applyPatternFormats", false)
-            .attr_bool("applyAlignmentFormats", false)
-            .attr_bool("applyWidthHeightFormats", true)
             .attr("dataCaption", &self.data_caption)
-            .attr_num("updatedVersion", 8)
-            .attr_num("minRefreshableVersion", 3)
-            .attr_bool("useAutoFormatting", true)
-            .attr_bool("itemPrintTitles", true)
-            .attr_bool("outline", true)
-            .attr_bool("outlineData", true)
-            .end_attrs();
+            .attr_bool("rowGrandTotals", self.row_grand_totals)
+            .attr_bool("colGrandTotals", self.col_grand_totals)
+            .attr_bool("gridDropZones", self.grid_drop_zones)
+            .attr_bool("showError", self.show_error)
+            .attr_bool("showMissing", self.show_missing);
+
+        if let Some(ref caption) = self.grand_total_caption {
+            w.attr("grandTotalCaption", caption);
+        }
+        if let Some(ref caption) = self.row_header_caption {
+            w.attr("rowHeaderCaption", caption);
+        }
+        if let Some(ref caption) = self.col_header_caption {
+            w.attr("colHeaderCaption", caption);
+        }
+        if let Some(ref caption) = self.error_caption {
+            w.attr("errorCaption", caption);
+        }
+        if let Some(ref caption) = self.missing_caption {
+            w.attr("missingCaption", caption);
+        }
+        write_preserved_attrs(
+            &mut w,
+            &self.ooxml_preservation.root_attributes,
+            &[
+                "name",
+                "cacheId",
+                "dataOnRows",
+                "dataCaption",
+                "rowGrandTotals",
+                "colGrandTotals",
+                "gridDropZones",
+                "showError",
+                "showMissing",
+                "grandTotalCaption",
+                "rowHeaderCaption",
+                "colHeaderCaption",
+                "errorCaption",
+                "missingCaption",
+            ],
+        );
+
+        w.end_attrs();
 
         // Write location
         self.location.write_xml(&mut w);
@@ -256,13 +324,93 @@ impl PivotTableWriter {
             w.end_element("dataFields");
         }
 
+        write_preserved_children(
+            &mut w,
+            &self.ooxml_preservation.children,
+            &[
+                "formats",
+                "conditionalFormats",
+                "chartFormats",
+                "pivotHierarchies",
+            ],
+        );
+
         // Write style info
         if let Some(ref style) = self.style {
             style.write_xml(&mut w);
         }
 
+        write_preserved_children(
+            &mut w,
+            &self.ooxml_preservation.children,
+            &["filters", "rowHierarchiesUsage", "colHierarchiesUsage"],
+        );
+        for child in &self.ooxml_preservation.children {
+            if ![
+                "formats",
+                "conditionalFormats",
+                "chartFormats",
+                "pivotHierarchies",
+                "filters",
+                "rowHierarchiesUsage",
+                "colHierarchiesUsage",
+            ]
+            .contains(&child.local_name.as_str())
+            {
+                w.raw_str(&child.xml);
+            }
+        }
+
         w.end_element("pivotTableDefinition");
 
         w.finish()
+    }
+}
+
+fn write_preserved_children(
+    w: &mut XmlWriter,
+    children: &[domain_types::domain::pivot::PivotRawXmlBlock],
+    local_names: &[&str],
+) {
+    for child in children {
+        if local_names.contains(&child.local_name.as_str()) {
+            w.raw_str(&child.xml);
+        }
+    }
+}
+
+trait PivotWriterPreservedAttrs {
+    fn apply_preserved_attrs(
+        &mut self,
+        attrs: &[PivotRawXmlAttribute],
+        typed_local_names: &[&str],
+    ) -> &mut Self;
+}
+
+impl PivotWriterPreservedAttrs for XmlWriter {
+    fn apply_preserved_attrs(
+        &mut self,
+        attrs: &[PivotRawXmlAttribute],
+        typed_local_names: &[&str],
+    ) -> &mut Self {
+        write_preserved_attrs(self, attrs, typed_local_names);
+        self
+    }
+}
+
+fn write_preserved_attrs(
+    w: &mut XmlWriter,
+    attrs: &[PivotRawXmlAttribute],
+    typed_local_names: &[&str],
+) {
+    for attr in attrs {
+        let local = attr
+            .name
+            .rsplit_once(':')
+            .map(|(_, local)| local)
+            .unwrap_or(attr.name.as_str());
+        if !typed_local_names.contains(&local) {
+            w.attr(&attr.name, &attr.value);
+        }
     }
 }

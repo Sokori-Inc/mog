@@ -262,6 +262,32 @@ mod format_value_types {
         assert_eq!(format_value(&val, "0.00", &locale_us()).text, "");
         assert_eq!(format_value(&val, "$#,##0", &locale_us()).text, "");
     }
+
+    #[test]
+    fn control_uses_boolean_value() {
+        let checked = value_types::CellValue::Control(value_types::CellControl::checkbox(true));
+        let unchecked = value_types::CellValue::Control(value_types::CellControl::checkbox(false));
+        assert_eq!(format_value(&checked, "0.00", &locale_us()).text, "TRUE");
+        assert_eq!(
+            format_value(&unchecked, "#,##0", &locale_us()).text,
+            "FALSE"
+        );
+    }
+
+    #[test]
+    fn image_uses_fallback_text() {
+        let image = value_types::CellImage::new(
+            "https://example.test/cat.png",
+            Some(Arc::from("Quarterly chart")),
+            value_types::CellImageSizing::Fit,
+            None,
+            None,
+        );
+        let val = value_types::CellValue::Image(image);
+        let r = format_value(&val, "$#,##0", &locale_us());
+        assert_eq!(r.text, "Quarterly chart");
+        assert!(!r.is_error);
+    }
 }
 
 // =========================================================================
@@ -684,6 +710,48 @@ mod fractions {
         // 1.5 with `# ???/???` — emit "1 1/2" with no padding artifacts.
         let result = format_number(1.5, "# ???/???");
         assert_eq!(result, "1 1/2");
+    }
+
+    #[test]
+    fn fixed_denominator_quarter_under_one() {
+        let result = format_number(0.25, "# ?/4");
+        assert_eq!(result, "  1/4");
+    }
+
+    #[test]
+    fn fixed_denominator_quarter_mixed_number() {
+        let result = format_number(1.25, "# ?/4");
+        assert_eq!(result, "1 1/4");
+    }
+
+    #[test]
+    fn fixed_denominator_tenths() {
+        let result = format_number(0.3, "# ?/10");
+        assert_eq!(result, "  3/10");
+    }
+
+    #[test]
+    fn fixed_denominator_whole_number_preserves_fraction_columns() {
+        let result = format_number(5.0, "# ?/4");
+        assert_eq!(result, "5  /4");
+    }
+
+    #[test]
+    fn fixed_denominator_carries_when_rounded_numerator_reaches_denominator() {
+        let result = format_number(0.99, "# ?/4");
+        assert_eq!(result, "1  /4");
+    }
+
+    #[test]
+    fn fixed_denominator_sixteenths() {
+        let result = format_number(0.3125, "# ??/16");
+        assert_eq!(result, "  5/16");
+    }
+
+    #[test]
+    fn fixed_denominator_hundredths() {
+        let result = format_number(0.03, "# ??/100");
+        assert_eq!(result, "  3/100");
     }
 }
 

@@ -24,4 +24,6 @@
 
 pub mod assertions;
 pub mod fixtures;
+pub mod iterative_identity;
 pub mod matrix;
+pub mod recalc_fixtures;

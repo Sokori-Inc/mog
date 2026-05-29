@@ -4,20 +4,15 @@
  * Self-sufficient Scale to Fit group for the Page Layout ribbon.
  * Contains: Width, Height, Scale percentage controls
  *
- * NOTE: Scale to Fit is currently a stub - the controls are rendered
- * but not connected to actual page scaling logic. This is marked as P3
- * priority in the PageLayoutRibbon comments.
- *
- * This follows the HomeRibbon group pattern - no props, all state
- * will come from hooks when implemented.
- *
  */
 
-import { useState } from 'react';
+import { useCallback } from 'react';
 
 import { SCALE_TO_FIT_COLLAPSE_CONFIG } from '@mog-sdk/contracts/ribbon';
+import { useActiveSheetId, useDispatch, usePrintSettings } from '../../../internal-api';
 import { ToolbarGroup } from '../primitives/ToolbarGroup';
 import { ScaleHeightIcon, ScaleIcon, ScaleWidthIcon } from '../primitives/ToolbarIcons';
+import { RibbonVisibilityItem } from '../visibility/RibbonVisibilityContext';
 
 // =============================================================================
 // Component
@@ -26,23 +21,50 @@ import { ScaleHeightIcon, ScaleIcon, ScaleWidthIcon } from '../primitives/Toolba
 /**
  * ScaleToFitGroup - Self-sufficient scale to fit group.
  *
- * Currently uses local state as placeholder until Scale to Fit
- * is properly implemented in the print system.
- *
- * Priority: Ribbon Polish
+ * Reads from the active sheet print mirror and writes through the page
+ * setup action handler, matching the rest of Page Layout.
  */
 export function ScaleToFitGroup() {
-  // ===========================================================================
-  // Local State (placeholder until Scale to Fit is implemented)
-  // ===========================================================================
+  const dispatch = useDispatch();
+  const activeSheetId = useActiveSheetId();
+  const { settings } = usePrintSettings(activeSheetId);
 
-  // TODO: Replace with hook once Scale to Fit is implemented in print system
-  const [scaleWidth, setScaleWidth] = useState('auto');
-  const [scaleHeight, setScaleHeight] = useState('auto');
-  const [scalePercent, setScalePercent] = useState(100);
+  const scaleWidth = settings.fitToWidth == null ? 'auto' : String(settings.fitToWidth);
+  const scaleHeight = settings.fitToHeight == null ? 'auto' : String(settings.fitToHeight);
+  const scalePercent = settings.scale ?? 100;
 
-  // Scale to Fit is not yet implemented - controls are disabled
-  const isEnabled = false;
+  const handleFitWidthChange = useCallback(
+    (value: string) => {
+      dispatch('SET_PAGE_SCALE', {
+        fitTo: {
+          width: value === 'auto' ? undefined : Number(value),
+          height: settings.fitToHeight ?? undefined,
+        },
+      });
+    },
+    [dispatch, settings.fitToHeight],
+  );
+
+  const handleFitHeightChange = useCallback(
+    (value: string) => {
+      dispatch('SET_PAGE_SCALE', {
+        fitTo: {
+          width: settings.fitToWidth ?? undefined,
+          height: value === 'auto' ? undefined : Number(value),
+        },
+      });
+    },
+    [dispatch, settings.fitToWidth],
+  );
+
+  const handleScaleChange = useCallback(
+    (value: string) => {
+      const nextScale = Number(value);
+      if (!Number.isFinite(nextScale)) return;
+      dispatch('SET_PAGE_SCALE', { scale: nextScale });
+    },
+    [dispatch],
+  );
 
   // ===========================================================================
   // Render
@@ -56,85 +78,88 @@ export function ScaleToFitGroup() {
     >
       <div className="flex items-center gap-2 px-2 py-1">
         {/* Width dropdown */}
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-1">
-            <ScaleWidthIcon />
-            <span className="text-ribbon text-ss-text-tertiary">Width:</span>
-          </div>
-          <select
-            value={scaleWidth}
-            onChange={(e) => setScaleWidth(e.target.value)}
-            disabled={!isEnabled}
-            className={`
+        <RibbonVisibilityItem item="width">
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-1">
+              <ScaleWidthIcon />
+              <span className="text-ribbon text-ss-text-tertiary">Width:</span>
+            </div>
+            <select
+              value={scaleWidth}
+              onChange={(e) => handleFitWidthChange(e.target.value)}
+              className={`
  h-6 px-1 rounded border border-ss-border
  bg-ss-surface text-ribbon text-ss-text-secondary
  outline-none w-[70px]
- ${isEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}
+ cursor-pointer
  `}
-            title="Scale Width"
-            aria-label="Scale Width"
-          >
-            <option value="auto">Automatic</option>
-            <option value="1">1 page</option>
-            <option value="2">2 pages</option>
-            <option value="3">3 pages</option>
-            <option value="4">4 pages</option>
-          </select>
-        </div>
+              title="Scale Width"
+              aria-label="Scale Width"
+            >
+              <option value="auto">Automatic</option>
+              <option value="1">1 page</option>
+              <option value="2">2 pages</option>
+              <option value="3">3 pages</option>
+              <option value="4">4 pages</option>
+            </select>
+          </div>
+        </RibbonVisibilityItem>
 
         {/* Height dropdown */}
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-1">
-            <ScaleHeightIcon />
-            <span className="text-ribbon text-ss-text-tertiary">Height:</span>
-          </div>
-          <select
-            value={scaleHeight}
-            onChange={(e) => setScaleHeight(e.target.value)}
-            disabled={!isEnabled}
-            className={`
+        <RibbonVisibilityItem item="height">
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-1">
+              <ScaleHeightIcon />
+              <span className="text-ribbon text-ss-text-tertiary">Height:</span>
+            </div>
+            <select
+              value={scaleHeight}
+              onChange={(e) => handleFitHeightChange(e.target.value)}
+              className={`
  h-6 px-1 rounded border border-ss-border
  bg-ss-surface text-ribbon text-ss-text-secondary
  outline-none w-[70px]
- ${isEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}
+ cursor-pointer
  `}
-            title="Scale Height"
-            aria-label="Scale Height"
-          >
-            <option value="auto">Automatic</option>
-            <option value="1">1 page</option>
-            <option value="2">2 pages</option>
-            <option value="3">3 pages</option>
-            <option value="4">4 pages</option>
-          </select>
-        </div>
+              title="Scale Height"
+              aria-label="Scale Height"
+            >
+              <option value="auto">Automatic</option>
+              <option value="1">1 page</option>
+              <option value="2">2 pages</option>
+              <option value="3">3 pages</option>
+              <option value="4">4 pages</option>
+            </select>
+          </div>
+        </RibbonVisibilityItem>
 
         {/* Scale percentage */}
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-1">
-            <ScaleIcon />
-            <span className="text-ribbon text-ss-text-tertiary">Scale:</span>
-          </div>
-          <div className="flex items-center gap-0.5">
-            <input
-              type="number"
-              min={10}
-              max={400}
-              value={scalePercent}
-              onChange={(e) => setScalePercent(parseInt(e.target.value, 10))}
-              disabled={!isEnabled}
-              className={`
+        <RibbonVisibilityItem item="scale">
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-1">
+              <ScaleIcon />
+              <span className="text-ribbon text-ss-text-tertiary">Scale:</span>
+            </div>
+            <div className="flex items-center gap-0.5">
+              <input
+                type="number"
+                min={10}
+                max={400}
+                value={scalePercent}
+                onChange={(e) => handleScaleChange(e.target.value)}
+                className={`
  h-6 px-1 rounded border border-ss-border
  bg-ss-surface text-ribbon text-ss-text-secondary text-center
  outline-none w-[50px]
- ${isEnabled ? 'cursor-text' : 'cursor-not-allowed opacity-50'}
+ cursor-text
  `}
-              title="Scale Percentage"
-              aria-label="Scale Percentage"
-            />
-            <span className="text-ribbon text-ss-text-tertiary">%</span>
+                title="Scale Percentage"
+                aria-label="Scale Percentage"
+              />
+              <span className="text-ribbon text-ss-text-tertiary">%</span>
+            </div>
           </div>
-        </div>
+        </RibbonVisibilityItem>
       </div>
     </ToolbarGroup>
   );

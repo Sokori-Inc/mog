@@ -1,7 +1,7 @@
 //! End-to-end round-trip tests for worksheet-level `<conditionalFormatting>`.
 //!
 //! Typed OOXML preservation: inventory row 5.4 deleted the raw-XML sidecar
-//! (`SheetRoundTripContext.conditional_formatting_xml`); the writer now
+//! raw worksheet XML sidecars; the writer now
 //! always reconstructs `<conditionalFormatting>` from the typed
 //! `SheetData.conditional_formats` list. These tests lock the typed
 //! reconstruction for the rule variants that already had lossless
@@ -52,10 +52,10 @@ fn cf_cell_value_rule_round_trips() {
     };
 
     let po = make_sheet_with_cf(cf);
-    let bytes = write_xlsx_from_parse_output(&po, None).expect("write");
+    let bytes = write_xlsx_from_parse_output(&po).expect("write");
     assert_eq!(&bytes[0..2], b"PK");
 
-    let (rt, _ctx, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
+    let (rt, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
     let cfs = &rt.sheets[0].conditional_formats;
     assert_eq!(
         cfs.len(),
@@ -66,6 +66,41 @@ fn cf_cell_value_rule_round_trips() {
     match &cfs[0].rules[0] {
         CFRule::CellValue { operator, .. } => assert_eq!(*operator, CfOperator::GreaterThan),
         other => panic!("expected CellValue rule, got {:?}", other),
+    }
+}
+
+#[test]
+fn cf_formula_dxf_fill_round_trips() {
+    let cf = ConditionalFormat {
+        id: "cf-formula-dxf".to_string(),
+        sheet_id: String::new(),
+        pivot: None,
+        ranges: vec![CFCellRange::new(0, 0, 9, 0)], // A1:A10
+        range_identities: None,
+        rules: vec![CFRule::Formula {
+            id: "rule-formula".to_string(),
+            priority: 1,
+            stop_if_true: None,
+            formula: "A1>0".to_string(),
+            style: CFStyle {
+                background_color: Some("#FFCCCC".to_string()),
+                dxf_id: Some(0),
+                ..Default::default()
+            },
+            text: None,
+        }],
+    };
+
+    let po = make_sheet_with_cf(cf);
+    let bytes = write_xlsx_from_parse_output(&po).expect("write");
+    let (rt, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
+
+    match &rt.sheets[0].conditional_formats[0].rules[0] {
+        CFRule::Formula { style, .. } => {
+            assert_eq!(style.dxf_id, Some(0));
+            assert_eq!(style.background_color.as_deref(), Some("#ffcccc"));
+        }
+        other => panic!("expected Formula rule, got {:?}", other),
     }
 }
 
@@ -85,6 +120,7 @@ fn cf_color_scale_rule_round_trips_with_typed_value_refs() {
             priority: 1,
             stop_if_true: None,
             color_scale: CFColorScale {
+                points: Vec::new(),
                 min_point: CFColorPoint {
                     value: CFValueRef::Min,
                     color: "#FF0000".to_string(),
@@ -105,8 +141,8 @@ fn cf_color_scale_rule_round_trips_with_typed_value_refs() {
     };
 
     let po = make_sheet_with_cf(cf);
-    let bytes = write_xlsx_from_parse_output(&po, None).expect("write");
-    let (rt, _ctx, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
+    let bytes = write_xlsx_from_parse_output(&po).expect("write");
+    let (rt, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
 
     let cfs = &rt.sheets[0].conditional_formats;
     assert_eq!(cfs.len(), 1);
@@ -148,16 +184,19 @@ fn cf_icon_set_rule_round_trips() {
                 icon_set_name: IconSetType::ThreeArrows,
                 reverse_order: Some(true),
                 show_icon_only: None,
+                percent: None,
                 thresholds: vec![
                     CFIconThreshold {
                         value_type: ooxml_types::cond_format::CfvoType::Percent,
                         value: Some("33".into()),
                         gte: true,
+                        ext_lst_xml: None,
                     },
                     CFIconThreshold {
                         value_type: ooxml_types::cond_format::CfvoType::Percent,
                         value: Some("67".into()),
                         gte: true,
+                        ext_lst_xml: None,
                     },
                 ],
                 custom_icons: Vec::new(),
@@ -166,8 +205,8 @@ fn cf_icon_set_rule_round_trips() {
     };
 
     let po = make_sheet_with_cf(cf);
-    let bytes = write_xlsx_from_parse_output(&po, None).expect("write");
-    let (rt, _ctx, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
+    let bytes = write_xlsx_from_parse_output(&po).expect("write");
+    let (rt, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
 
     let cfs = &rt.sheets[0].conditional_formats;
     match &cfs[0].rules[0] {
@@ -208,6 +247,7 @@ fn cf_data_bar_rule_round_trips_with_typed_value_refs() {
                 positive_color: "#638EC6".to_string(),
                 negative_color: None,
                 border_color: None,
+                negative_border_color: None,
                 show_border: None,
                 gradient: None,
                 direction: None,
@@ -222,8 +262,8 @@ fn cf_data_bar_rule_round_trips_with_typed_value_refs() {
     };
 
     let po = make_sheet_with_cf(cf);
-    let bytes = write_xlsx_from_parse_output(&po, None).expect("write");
-    let (rt, _ctx, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
+    let bytes = write_xlsx_from_parse_output(&po).expect("write");
+    let (rt, _diag) = parse_xlsx_to_output(&bytes).expect("parse");
 
     let cfs = &rt.sheets[0].conditional_formats;
     match &cfs[0].rules[0] {

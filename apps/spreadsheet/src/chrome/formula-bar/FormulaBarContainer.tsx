@@ -35,10 +35,12 @@ import {
 import type { FormulaA1 } from '@mog-sdk/contracts/cells';
 import type { CellFormat, CellValue } from '@mog-sdk/contracts/core';
 import { toA1 } from '@mog/spreadsheet-utils/a1';
+import { ensureFormulaA1 } from '@mog/spreadsheet-utils/cells/formula-string';
 import { dispatch } from '../../actions';
 import { FormulaArgumentHint } from '../../components/editor/FormulaArgumentHint';
 import type { ReferenceColorRange } from '../../components/editor/FormulaHighlighter';
 import { FunctionSuggestions } from '../../components/editor/FunctionSuggestions';
+import { resolveCalculatedColumnCellContext } from '../../coordinator/tables/calculated-column-context';
 import { withHandlerErrors } from '../../devtools/handler-error-boundary';
 import { extractFormulaRanges } from '../../domain/editor/formula-range-parser';
 import { useFormulaAutocomplete } from '../../hooks/editing/use-formula-autocomplete';
@@ -283,21 +285,29 @@ function FormulaBarContainerImpl() {
     void (async () => {
       const cell = await ws.getCell(activeCellRow, activeCellCol);
       const rawData = await ws.getRawCellData(activeCellRow, activeCellCol, true);
+      const calculatedColumnContext = await resolveCalculatedColumnCellContext(
+        activeSheetId,
+        activeCellRow,
+        activeCellCol,
+        wb,
+      );
       if (cancelled) return;
-      if (cell.value === null && !rawData.formula) {
+      const formulaText = calculatedColumnContext?.calculatedFormula ?? rawData.formula;
+      const formula = formulaText ? ensureFormulaA1(formulaText) : undefined;
+      if (cell.value === null && !formula) {
         setCellData(undefined);
         return;
       }
       setCellData({
         raw: rawData.value,
         computed: cell.value,
-        formula: rawData.formula ?? undefined,
+        formula,
       });
     })();
     return () => {
       cancelled = true;
     };
-  }, [ws, activeCellRow, activeCellCol, structureVersion]);
+  }, [ws, wb, activeSheetId, activeCellRow, activeCellCol, structureVersion]);
 
   // Get raw value from the cell data for formula bar display
   const rawValue = useMemo(() => {

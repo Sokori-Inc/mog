@@ -5,6 +5,24 @@ use super::helpers::*;
 use crate::snapshot::{CellData, SheetSnapshot};
 use value_types::{CellValue, FiniteF64};
 
+fn stored_number_format_at(
+    engine: &YrsComputeEngine,
+    sheet_id: &cell_types::SheetId,
+    row: u32,
+    col: u32,
+) -> Option<String> {
+    let cell_id = crate::storage::engine::services::cell_editing::find_cell_id_at(
+        &engine.stores,
+        sheet_id,
+        row,
+        col,
+    )
+    .expect("cell allocated");
+    engine
+        .get_cell_format(sheet_id, &cell_id, row, col)
+        .number_format
+}
+
 #[test]
 fn test_format_cell_display_general_number() {
     let snap = simple_snapshot();
@@ -263,6 +281,272 @@ fn formula_edit_copies_number_format_through_formula_chain() {
     let resolved = engine.get_resolved_format(&sid, 0, 2);
     assert_eq!(resolved.number_format.as_deref(), Some("$#,##0.00"));
     assert_eq!(engine.format_cell_display(&sid, 0, 2), "$40.00");
+}
+
+#[test]
+fn test_set_cell_date_formula_applies_date_format() {
+    use crate::bridge_types::CellInput;
+
+    let snap = simple_snapshot();
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(snap).unwrap();
+    let sid = sheet_id();
+
+    engine
+        .batch_set_cells_by_position(
+            vec![(
+                sid,
+                0u32,
+                3u32,
+                CellInput::Parse {
+                    text: "=DATE(2026,1,2)".to_string(),
+                },
+            )],
+            true,
+        )
+        .unwrap();
+
+    let cell_value = engine
+        .mirror()
+        .get_cell_value_at(&sid, cell_types::SheetPos::new(0, 3));
+    match cell_value {
+        Some(CellValue::Number(serial)) => {
+            assert!(
+                serial.get() > 40000.0,
+                "expected date serial, got {serial:?}"
+            );
+        }
+        other => panic!("expected Number for DATE formula result, got {:?}", other),
+    }
+
+    assert_eq!(
+        stored_number_format_at(&engine, &sid, 0, 3).as_deref(),
+        Some("M/d/yyyy")
+    );
+    let display = engine.format_cell_display(&sid, 0, 3);
+    assert_eq!(display, "1/2/2026");
+    assert_ne!(display, "46024");
+}
+
+#[test]
+fn test_set_cell_datevalue_formula_keeps_general_serial_display() {
+    use crate::bridge_types::CellInput;
+
+    let snap = simple_snapshot();
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(snap).unwrap();
+    let sid = sheet_id();
+
+    engine
+        .batch_set_cells_by_position(
+            vec![(
+                sid,
+                0u32,
+                3u32,
+                CellInput::Parse {
+                    text: "=DATEVALUE(\"2/29/1900\")".to_string(),
+                },
+            )],
+            true,
+        )
+        .unwrap();
+
+    let cell_value = engine
+        .mirror()
+        .get_cell_value_at(&sid, cell_types::SheetPos::new(0, 3));
+    match cell_value {
+        Some(CellValue::Number(serial)) => assert_eq!(serial.get(), 60.0),
+        other => panic!(
+            "expected Number for DATEVALUE formula result, got {:?}",
+            other
+        ),
+    }
+
+    assert!(matches!(
+        stored_number_format_at(&engine, &sid, 0, 3).as_deref(),
+        None | Some("General")
+    ));
+    assert_eq!(engine.format_cell_display(&sid, 0, 3), "60");
+}
+
+#[test]
+fn test_date_pair_formulas_inherit_shared_reference_date_format() {
+    use crate::bridge_types::CellInput;
+    use domain_types::CellFormat;
+
+    let snap = simple_snapshot();
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(snap).unwrap();
+    let sid = sheet_id();
+
+    engine
+        .set_format_for_ranges(
+            &sid,
+            &[(0, 0, 0, 1)],
+            &CellFormat {
+                number_format: Some("yyyy-MM-dd".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    engine
+        .batch_set_cells_by_position(
+            vec![
+                (
+                    sid,
+                    0u32,
+                    2u32,
+                    CellInput::Parse {
+                        text: "=DATEDIF(A1,B1,\"d\")".to_string(),
+                    },
+                ),
+                (
+                    sid,
+                    0u32,
+                    3u32,
+                    CellInput::Parse {
+                        text: "=NETWORKDAYS(A1,B1)".to_string(),
+                    },
+                ),
+                (
+                    sid,
+                    0u32,
+                    4u32,
+                    CellInput::Parse {
+                        text: "=DAYS(B1,A1)".to_string(),
+                    },
+                ),
+            ],
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(
+        stored_number_format_at(&engine, &sid, 0, 2).as_deref(),
+        Some("yyyy-MM-dd")
+    );
+    assert_eq!(
+        stored_number_format_at(&engine, &sid, 0, 3).as_deref(),
+        Some("yyyy-MM-dd")
+    );
+    assert_eq!(
+        stored_number_format_at(&engine, &sid, 0, 4).as_deref(),
+        Some("yyyy-MM-dd")
+    );
+}
+
+#[test]
+fn test_networkdays_expression_argument_keeps_numeric_format() {
+    use crate::bridge_types::CellInput;
+    use domain_types::CellFormat;
+
+    let snap = simple_snapshot();
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(snap).unwrap();
+    let sid = sheet_id();
+
+    engine
+        .set_format_for_ranges(
+            &sid,
+            &[(0, 0, 0, 0)],
+            &CellFormat {
+                number_format: Some("M/d/yyyy".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    engine
+        .batch_set_cells_by_position(
+            vec![(
+                sid,
+                0u32,
+                2u32,
+                CellInput::Parse {
+                    text: "=NETWORKDAYS(A1,A1+7)".to_string(),
+                },
+            )],
+            true,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        stored_number_format_at(&engine, &sid, 0, 2).as_deref(),
+        None | Some("General")
+    ));
+}
+
+#[test]
+fn test_set_cell_date_formula_preserves_explicit_destination_format() {
+    use crate::bridge_types::CellInput;
+    use domain_types::CellFormat;
+
+    let snap = simple_snapshot();
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(snap).unwrap();
+    let sid = sheet_id();
+
+    engine
+        .set_format_for_ranges(
+            &sid,
+            &[(0, 4, 0, 4)],
+            &CellFormat {
+                number_format: Some("0.00".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    engine
+        .batch_set_cells_by_position(
+            vec![(
+                sid,
+                0u32,
+                4u32,
+                CellInput::Parse {
+                    text: "=DATE(2026,1,2)".to_string(),
+                },
+            )],
+            true,
+        )
+        .unwrap();
+
+    let resolved = engine.get_resolved_format(&sid, 0, 4);
+    assert_eq!(resolved.number_format.as_deref(), Some("0.00"));
+    assert_eq!(engine.format_cell_display(&sid, 0, 4), "46024.00");
+}
+
+#[test]
+fn test_set_cell_date_formula_error_keeps_general_format() {
+    use crate::bridge_types::CellInput;
+
+    let snap = simple_snapshot();
+    let (mut engine, _) = YrsComputeEngine::from_snapshot(snap).unwrap();
+    let sid = sheet_id();
+
+    engine
+        .batch_set_cells_by_position(
+            vec![(
+                sid,
+                0u32,
+                5u32,
+                CellInput::Parse {
+                    text: "=DATE(\"bad\",1,2)".to_string(),
+                },
+            )],
+            true,
+        )
+        .unwrap();
+
+    let cell_value = engine
+        .mirror()
+        .get_cell_value_at(&sid, cell_types::SheetPos::new(0, 5));
+    assert!(
+        matches!(cell_value, Some(CellValue::Error(_, _))),
+        "expected error for invalid DATE formula, got {:?}",
+        cell_value
+    );
+    let resolved = engine.get_resolved_format(&sid, 0, 5);
+    assert!(matches!(
+        resolved.number_format.as_deref(),
+        None | Some("General")
+    ));
 }
 
 #[test]

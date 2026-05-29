@@ -63,6 +63,10 @@ pub(super) fn convert_font_to_input(f: &FontOutput) -> FontInput {
         color: f.color.as_ref().map(convert_color_to_input),
         scheme: f.scheme.clone(),
         vert_align: f.vert_align.clone(),
+        condense: f.condense,
+        extend: f.extend,
+        outline: f.outline,
+        shadow: f.shadow,
         charset: None,
         family: f.family,
     }
@@ -141,6 +145,8 @@ pub(super) fn convert_xf_to_input(xf: &CellXfOutput) -> CellXfInput {
         apply_protection: xf.apply_protection,
         alignment: xf.alignment.as_ref().map(convert_alignment_to_input),
         protection: xf.protection.as_ref().map(convert_protection_to_input),
+        quote_prefix: xf.quote_prefix,
+        pivot_button: xf.pivot_button,
     }
 }
 

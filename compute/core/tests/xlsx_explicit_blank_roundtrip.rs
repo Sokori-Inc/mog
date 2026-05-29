@@ -9,17 +9,6 @@ fn l2_roundtrip_preserves_explicit_styleless_blank_cells() {
     let exported_parse = engine
         .export_to_parse_output()
         .expect("export parse output");
-    let rt = exported_parse
-        .round_trip_context
-        .as_ref()
-        .expect("xlsx import should retain round-trip context");
-    assert!(
-        rt.sheets[0]
-            .explicit_blank_cells
-            .iter()
-            .any(|&(row, col)| row == 64 && col == 110),
-        "import should record explicit styleless blank cells"
-    );
     assert!(
         exported_parse.parse_output.sheets[0]
             .cells
@@ -28,7 +17,7 @@ fn l2_roundtrip_preserves_explicit_styleless_blank_cells() {
         "engine ParseOutput export should replay explicit blank cells"
     );
     let exported = engine.export_to_xlsx_bytes().expect("export xlsx");
-    let (reparsed, _roundtrip, _diagnostics) =
+    let (reparsed, _diagnostics) =
         xlsx_parser::parse_xlsx_to_output(&exported).expect("parse exported xlsx");
 
     let sheet = &reparsed.sheets[0];

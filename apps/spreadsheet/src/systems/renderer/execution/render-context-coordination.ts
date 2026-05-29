@@ -333,12 +333,7 @@ export interface RenderContextCoordinationConfig {
    * Resolve CellId to position for rendering trace arrows.
    * Used by TraceArrowsLayer to convert CellId-based arrow endpoints to row/col.
    */
-  getCellPositionForTrace?: (
-    cellId: string,
-  ) =>
-    | { row: number; col: number; sheet: string }
-    | null
-    | Promise<{ row: number; col: number; sheet: string } | null>;
+  getCellPositionForTrace?: (cellId: string) => { row: number; col: number; sheet: string } | null;
 
   // ===========================================================================
   // Paste Preview
@@ -676,7 +671,7 @@ export function setupRenderContextCoordination(
       maxColOutlineLevel: config.maxColOutlineLevel ?? 0,
       // Formula Auditing
       traceArrows: getTraceArrows?.() ?? [],
-      getCellPosition: getCellPositionForTrace as RenderContextConfig['getCellPosition'],
+      getCellPosition: getCellPositionForTrace,
       // Font Preview
       previewFont: getPreviewFont?.() ?? null,
       // Charts

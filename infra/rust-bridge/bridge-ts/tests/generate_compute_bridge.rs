@@ -15,15 +15,38 @@ fn generate_compute_bridge() {
 
     let source_files = vec![
         format!("{}/compute/core/src/storage/engine/mod.rs", base),
+        format!("{}/compute/core/src/storage/engine/bridge_imports.rs", base),
+        format!("{}/compute/core/src/storage/engine/workbook_theme.rs", base),
+        format!("{}/compute/core/src/storage/engine/cell_bridge.rs", base),
+        format!("{}/compute/core/src/storage/engine/undo_bridge.rs", base),
+        format!("{}/compute/core/src/storage/engine/sync_bridge.rs", base),
         format!("{}/compute/core/src/bridge_pure.rs", base),
         format!("{}/compute/core/src/storage/engine/delegations.rs", base),
         format!("{}/compute/core/src/storage/engine/viewport/mod.rs", base),
         format!("{}/compute/core/src/storage/engine/queries.rs", base),
-        format!("{}/compute/core/src/storage/engine/structural.rs", base),
-        format!("{}/compute/core/src/storage/engine/formatting.rs", base),
+        format!("{}/compute/core/src/storage/engine/structural/mod.rs", base),
+        format!("{}/compute/core/src/storage/engine/formatting/mod.rs", base),
         format!("{}/compute/core/src/storage/engine/tables.rs", base),
-        format!("{}/compute/core/src/storage/engine/features.rs", base),
-        format!("{}/compute/core/src/storage/engine/objects.rs", base),
+        format!("{}/compute/core/src/storage/engine/features/mod.rs", base),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/comments.rs",
+            base
+        ),
+        format!("{}/compute/core/src/storage/engine/objects/charts.rs", base),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/floating.rs",
+            base
+        ),
+        format!("{}/compute/core/src/storage/engine/objects/groups.rs", base),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/z_order.rs",
+            base
+        ),
+        format!(
+            "{}/compute/core/src/storage/engine/objects/hyperlinks.rs",
+            base
+        ),
+        format!("{}/compute/core/src/storage/engine/objects/pivots.rs", base),
         format!(
             "{}/compute/core/src/storage/engine/viewport/registry.rs",
             base
@@ -363,6 +386,7 @@ fn build_import_config() -> ImportConfig {
                     ti("FormatEntry"),
                     ti("DateValueResult"),
                     ti("ParsedDateInput"),
+                    ti("FormulaCircularReferenceValidation"),
                     ti("Locale"),
                     // CF bridge stubs
                     ti("CFRuleWire"),

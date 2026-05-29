@@ -8,6 +8,10 @@
 
 use std::collections::HashMap;
 
+use crate::infra::opc::{
+    DrawingRelationships, OoxmlRelationshipType, PackageOwner, RelationshipTarget,
+    WorksheetRelationships, parse_owned_relationships,
+};
 use crate::infra::scanner::{extract_quoted_value, find_attr_simd, find_gt_simd, find_tag_simd};
 
 /// Info about a chart reference found in a drawing.
@@ -22,6 +26,10 @@ pub struct ChartRefInfo {
     pub from_col_off: i64,
     /// EMU offset within the from-cell row
     pub from_row_off: i64,
+    /// Absolute x position in EMUs for `xdr:absoluteAnchor`
+    pub absolute_x: Option<i64>,
+    /// Absolute y position in EMUs for `xdr:absoluteAnchor`
+    pub absolute_y: Option<i64>,
     /// End anchor row (for twoCellAnchor)
     pub to_row: Option<u32>,
     /// End anchor col (for twoCellAnchor)
@@ -72,35 +80,57 @@ pub struct ChartRefInfo {
 }
 
 /// Extract drawing relationship target from sheet .rels XML.
+#[cfg(test)]
 pub(super) fn extract_drawing_target(rels_xml: &[u8]) -> Option<String> {
-    let mut pos = 0;
-    while let Some(rel_start) = find_tag_simd(rels_xml, b"Relationship", pos) {
-        let rel_end = find_gt_simd(rels_xml, rel_start)
-            .map(|p| p + 1)
-            .unwrap_or(rels_xml.len());
-        let rel_elem = &rels_xml[rel_start..rel_end];
+    let relationships = parse_owned_relationships(
+        PackageOwner::Worksheet {
+            sheet_index: 0,
+            path: "xl/worksheets/sheet1.xml".to_string(),
+        },
+        rels_xml,
+    );
+    WorksheetRelationships::new(&relationships)
+        .drawing()
+        .map(|rel| rel.target.raw().to_string())
+}
 
-        // Check if Type contains "drawing"
-        if let Some(type_pos) = find_attr_simd(rel_elem, b"Type=\"", 0) {
-            let value_start = type_pos + 6; // len of 'Type="'
-            if let Some((ts, te)) = extract_quoted_value(rel_elem, value_start) {
-                let type_str = &rel_elem[ts..te];
-                if memchr::memmem::find(type_str, b"drawing").is_some() {
-                    // Extract Target attribute
-                    if let Some(target_pos) = find_attr_simd(rel_elem, b"Target=\"", 0) {
-                        let tgt_start = target_pos + 8; // len of 'Target="'
-                        if let Some((tgs, tge)) = extract_quoted_value(rel_elem, tgt_start) {
-                            if let Ok(target) = std::str::from_utf8(&rel_elem[tgs..tge]) {
-                                return Some(target.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        pos = rel_end;
+pub(super) fn extract_drawing_path_for_sheet(sheet_num: usize, rels_xml: &[u8]) -> Option<String> {
+    let relationships = parse_owned_relationships(
+        PackageOwner::Worksheet {
+            sheet_index: sheet_num,
+            path: format!("xl/worksheets/sheet{}.xml", sheet_num),
+        },
+        rels_xml,
+    );
+    WorksheetRelationships::new(&relationships)
+        .drawing()
+        .and_then(|rel| rel.target.path().map(ToOwned::to_owned))
+}
+
+pub(super) fn typed_drawing_relationships(
+    drawing_path: &str,
+    rels_xml: &[u8],
+) -> Vec<crate::infra::opc::OwnedRelationship> {
+    parse_owned_relationships(
+        PackageOwner::Drawing {
+            path: drawing_path.to_string(),
+        },
+        rels_xml,
+    )
+}
+
+pub(super) fn chart_rel_id_target_map(
+    drawing_relationships: &[crate::infra::opc::OwnedRelationship],
+) -> HashMap<String, String> {
+    DrawingRelationships::new(drawing_relationships)
+        .typed_target_map(&[OoxmlRelationshipType::Chart])
+}
+
+pub(super) fn internal_target_path(rel: &crate::infra::opc::OwnedRelationship) -> Option<String> {
+    match &rel.target {
+        RelationshipTarget::Internal { path, .. } => Some(path.clone()),
+        _ => None,
     }
-    None
 }
 
 /// Build a map of rId -> target from a .rels XML file.
@@ -195,6 +225,8 @@ pub(super) fn extract_chart_refs_from_drawing(
                         from_col,
                         from_col_off,
                         from_row_off,
+                        absolute_x: None,
+                        absolute_y: None,
                         to_row: Some(to_row),
                         to_col: Some(to_col),
                         to_col_off: Some(to_col_off),
@@ -253,6 +285,8 @@ pub(super) fn extract_chart_refs_from_drawing(
                         from_col,
                         from_col_off,
                         from_row_off,
+                        absolute_x: None,
+                        absolute_y: None,
                         to_row: None,
                         to_col: None,
                         to_col_off: None,
@@ -684,4 +718,26 @@ fn parse_client_data_attrs(anchor_bytes: &[u8]) -> (Option<bool>, Option<bool>) 
     let locks = extract_attr(el, b"fLocksWithSheet=\"");
     let prints = extract_attr(el, b"fPrintsWithSheet=\"");
     (locks, prints)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_drawing_target;
+
+    #[test]
+    fn extract_drawing_target_matches_only_drawing_relationship() {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
+
+        assert_eq!(
+            extract_drawing_target(rels).as_deref(),
+            Some("../drawings/drawing1.xml")
+        );
+    }
+
+    #[test]
+    fn extract_drawing_target_does_not_match_vml_drawing_relationship() {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments3.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/></Relationships>"#;
+
+        assert_eq!(extract_drawing_target(rels), None);
+    }
 }

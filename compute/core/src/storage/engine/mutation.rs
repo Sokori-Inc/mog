@@ -72,7 +72,9 @@ impl CellInput {
                     "FALSE".to_string()
                 },
             },
-            CellValue::Error(..) => CellInput::Clear,
+            CellValue::Error(error, _) => CellInput::Parse {
+                text: error.as_str().to_string(),
+            },
             CellValue::Array(_) => CellInput::Clear,
             CellValue::Control(c) => CellInput::Parse {
                 text: if c.value {
@@ -80,6 +82,9 @@ impl CellInput {
                 } else {
                     "FALSE".to_string()
                 },
+            },
+            CellValue::Image(image) => CellInput::Literal {
+                text: image.fallback_text().to_string(),
             },
         }
     }

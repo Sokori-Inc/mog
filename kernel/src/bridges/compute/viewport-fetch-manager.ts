@@ -25,8 +25,11 @@
 
 import type { BridgeTransport } from '@rust-bridge/client';
 
-import type { CellAccessor } from '../wire/binary-viewport-buffer';
-import type { ReadonlyBinaryViewportBuffer } from '../wire/viewport-coordinator';
+import type { CellAccessor, ViewportBounds } from '../wire/binary-viewport-buffer';
+import type {
+  ReadonlyBinaryViewportBuffer,
+  ViewportCoordinator,
+} from '../wire/viewport-coordinator';
 import { ViewportCoordinatorRegistry } from '../wire/viewport-coordinator-registry';
 import type {
   PrefetchConfig,
@@ -55,8 +58,10 @@ function hasOverlap(a: PrefetchBounds, b: PrefetchBounds): boolean {
   );
 }
 
-const HORIZONTAL_FREE_SCROLL_OVERSCAN_ROWS = 64;
-const HORIZONTAL_FREE_SCROLL_OVERSCAN_COLS = 100;
+// Horizontal wheel bursts in the free viewport need column runway, but should
+// not materially expand the off-axis row fetch during dense movement.
+const HORIZONTAL_FREE_SCROLL_OVERSCAN_ROWS = 32;
+const HORIZONTAL_FREE_SCROLL_OVERSCAN_COLS = 64;
 
 function isHorizontalOnlyMovement(
   current: PrefetchBounds,
@@ -178,6 +183,35 @@ export class ViewportFetchManager {
       endRow: bounds.endRow,
       endCol: bounds.endCol,
     });
+  }
+
+  private stripSheetId(bounds: ViewportBounds): PrefetchBounds {
+    return {
+      startRow: bounds.startRow,
+      startCol: bounds.startCol,
+      endRow: bounds.endRow,
+      endCol: bounds.endCol,
+    };
+  }
+
+  /**
+   * Force refreshes bypass refresh(), so mirror the committed coordinator
+   * buffer back into the per-viewport cache that render/devtools consumers read.
+   */
+  private markForceRefreshedViewportFresh(coordinator: ViewportCoordinator): void {
+    const vpState = this.perViewportState.get(coordinator.viewportId);
+    if (!vpState) return;
+
+    const refreshedBufferBounds = coordinator.base.getBounds();
+    const visibleWindow = coordinator.base.getVisibleWindow();
+
+    if (refreshedBufferBounds) {
+      vpState.prefetchBounds = this.stripSheetId(refreshedBufferBounds);
+    }
+    if (visibleWindow) {
+      vpState.lastVisibleBounds = this.stripSheetId(visibleWindow);
+    }
+    vpState.prefetchDirtyState = { staleCells: new Set(), dirtyRegion: null };
   }
 
   // ===========================================================================
@@ -397,7 +431,6 @@ export class ViewportFetchManager {
 
     for (const coordinator of coordinators) {
       // Use the coordinator's current buffer bounds to know what region to re-fetch.
-      // Use the coordinator's current buffer bounds to know what region to re-fetch
       const bounds = coordinator.base.getBounds();
       if (!bounds || !coordinator.base.hasBuffer()) continue;
 
@@ -420,6 +453,7 @@ export class ViewportFetchManager {
             },
           );
           coordinator.commitFetch(buffer, fetchEpoch);
+          this.markForceRefreshedViewportFresh(coordinator);
         })(),
       );
     }
@@ -459,6 +493,7 @@ export class ViewportFetchManager {
             },
           );
           coordinator.commitFetch(buffer, fetchEpoch);
+          this.markForceRefreshedViewportFresh(coordinator);
         })(),
       );
     }

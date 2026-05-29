@@ -9,10 +9,24 @@ use super::floating_object::{
     FloatingObjectAnchor, FloatingObjectCommon, FloatingObjectData,
 };
 use super::{
-    AnchorPosition, AxisData, ChartDataTableData, ChartDefinition, ChartFormatData,
-    ChartFormatStringData, ChartRoundTripData, ChartSubType, ChartType, ChartView3DData,
-    DataLabelData, LegendData, ObjectSize,
+    AnchorPosition, AxisData, ChartAuxiliaryPart, ChartDataTableData, ChartDefinition,
+    ChartFormatData, ChartFormatStringData, ChartRelationshipData, ChartSubType, ChartType,
+    ChartView3DData, DataLabelData, LegendData, ObjectSize, StandardChartExportAuthority,
+    StandardChartProvenance,
 };
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, DescribeSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct ChartExReplayData {
+    pub original_path: String,
+    pub original_xml: Vec<u8>,
+    pub original_position: AnchorPosition,
+    pub rels_path: Option<String>,
+    pub rels_xml: Option<Vec<u8>>,
+    pub relationships: Vec<ChartRelationshipData>,
+    pub auxiliary_files: Vec<(String, Vec<u8>)>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DescribeSchema)]
 #[serde(rename_all = "camelCase")]
@@ -25,11 +39,6 @@ pub struct ChartSpec {
     pub z_index: i32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub definition: Option<ChartDefinition>,
-    /// Original chart XML part for imported charts. This bypasses deep
-    /// ChartSpace JSON rehydration in the L2 export path.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub preserved_chart_xml: Option<String>,
-
     // -- Typed chart data (populated by XLSX parser, used by to_floating_object) --
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub series: Vec<ChartSeriesData>,
@@ -145,13 +154,28 @@ pub struct ChartSpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub back_wall_format: Option<ChartFormatData>,
 
-    // -- Round-trip preservation --
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub rt: Option<ChartRoundTripData>,
-
     /// Typed drawing-frame OOXML contract for imported chart anchors.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chart_frame: Option<ChartDrawingFrameOoxmlProps>,
+
+    /// Chart-owned package relationships imported with this chart part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chart_relationships: Vec<ChartRelationshipData>,
+
+    /// Chart-owned auxiliary package parts imported with this chart part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chart_auxiliary_files: Vec<(String, Vec<u8>)>,
+    /// Typed chart-owned auxiliary package parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chart_auxiliary_parts: Vec<ChartAuxiliaryPart>,
+    #[serde(skip)]
+    pub chart_ex_replay: Option<ChartExReplayData>,
+    /// Durable standard chart import provenance used by XLSX export planning.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub standard_chart_provenance: Option<StandardChartProvenance>,
+    /// Durable standard chart authority used to decide whether imported typed owners are current.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub standard_chart_export_authority: Option<StandardChartExportAuthority>,
 
     /// Whether this chart uses ChartEx format (cx: namespace) instead of standard c: namespace.
     /// ChartEx covers modern chart types: Waterfall, Treemap, Sunburst, Funnel, etc.
@@ -251,6 +275,8 @@ impl ChartSpec {
             anchor_col: anchor.anchor_col,
             anchor_row_offset: anchor.anchor_row_offset,
             anchor_col_offset: anchor.anchor_col_offset,
+            absolute_x: anchor.absolute_x,
+            absolute_y: anchor.absolute_y,
             end_row: anchor.end_row,
             end_col: anchor.end_col,
             end_row_offset: anchor.end_row_offset,
@@ -272,6 +298,19 @@ impl ChartSpec {
         // Unpack typed OOXML preservation data.
         let ooxml = chart_data.ooxml.as_ref();
         let chart_frame = ooxml.and_then(|o| o.drawing_frame.clone());
+        let chart_relationships = ooxml
+            .map(|o| o.chart_relationships.clone())
+            .unwrap_or_default();
+        let chart_auxiliary_files = ooxml
+            .map(|o| o.chart_auxiliary_files.clone())
+            .unwrap_or_default();
+        let chart_auxiliary_parts = ooxml
+            .map(|o| o.chart_auxiliary_parts.clone())
+            .unwrap_or_default();
+        let chart_ex_replay = ooxml.and_then(|o| o.chart_ex_replay.clone());
+        let standard_chart_provenance = ooxml.and_then(|o| o.standard_chart_provenance.clone());
+        let standard_chart_export_authority =
+            ooxml.and_then(|o| o.standard_chart_export_authority.clone());
         let is_chart_ex = ooxml.map(|o| o.is_chart_ex).unwrap_or_else(|| {
             matches!(
                 ooxml.and_then(|o| o.definition.as_ref()),
@@ -328,18 +367,13 @@ impl ChartSpec {
             )
         };
 
-        // Chart definition is typed inside the chart OOXML contract.
-        let definition = if chart_data.preserved_chart_xml.is_some() {
-            None
-        } else {
-            ooxml.and_then(|o| o.definition.clone()).or_else(|| {
-                Some(if is_chart_ex {
-                    ChartDefinition::ChartEx(ooxml_types::chart_ex::ChartExSpace::default())
-                } else {
-                    ChartDefinition::Chart(ooxml_types::charts::ChartSpace::default())
-                })
+        let definition = ooxml.and_then(|o| o.definition.clone()).or_else(|| {
+            Some(if is_chart_ex {
+                ChartDefinition::ChartEx(ooxml_types::chart_ex::ChartExSpace::default())
+            } else {
+                ChartDefinition::Chart(ooxml_types::charts::ChartSpace::default())
             })
-        };
+        });
 
         Some(ChartSpec {
             chart_type: chart_data.chart_type.clone(),
@@ -353,7 +387,6 @@ impl ChartSpec {
             size,
             z_index: common.z_index,
             definition,
-            preserved_chart_xml: chart_data.preserved_chart_xml.clone(),
             series: chart_data.series.clone().unwrap_or_default(),
             sub_type: chart_data.sub_type.clone(),
             legend: chart_data.legend.clone(),
@@ -406,9 +439,13 @@ impl ChartSpec {
             floor_format: chart_data.floor_format.clone(),
             side_wall_format: chart_data.side_wall_format.clone(),
             back_wall_format: chart_data.back_wall_format.clone(),
-            // Round-trip preservation
-            rt: chart_data.rt.clone(),
             chart_frame,
+            chart_relationships,
+            chart_auxiliary_files,
+            chart_auxiliary_parts,
+            chart_ex_replay,
+            standard_chart_provenance,
+            standard_chart_export_authority,
             is_chart_ex,
             cnv_pr_name,
             cnv_pr_id,
@@ -491,6 +528,7 @@ impl ChartSpec {
             client_data_prints_with_sheet: self.client_data_prints_with_sheet,
             relationship_id: None,
             relationship_target: None,
+            raw_alternate_content: None,
         })
     }
 
@@ -503,27 +541,41 @@ impl ChartSpec {
             .chart_frame
             .clone()
             .or_else(|| self.legacy_chart_frame_ooxml_props());
-        let definition = if self.preserved_chart_xml.is_some() {
-            None
-        } else {
-            self.definition.clone()
-        };
-        let ooxml_val = if definition.is_none() && drawing_frame.is_none() && !self.is_chart_ex {
+        let definition = self.definition.clone();
+        let ooxml_val = if definition.is_none()
+            && drawing_frame.is_none()
+            && self.chart_relationships.is_empty()
+            && self.chart_auxiliary_files.is_empty()
+            && self.chart_auxiliary_parts.is_empty()
+            && self.chart_ex_replay.is_none()
+            && self.standard_chart_provenance.is_none()
+            && self.standard_chart_export_authority.is_none()
+            && !self.is_chart_ex
+        {
             None
         } else {
             Some(ChartOoxmlProps {
                 definition,
                 drawing_frame,
+                chart_relationships: self.chart_relationships.clone(),
+                chart_auxiliary_files: self.chart_auxiliary_files.clone(),
+                chart_auxiliary_parts: self.chart_auxiliary_parts.clone(),
+                standard_chart_provenance: self.standard_chart_provenance.clone(),
+                standard_chart_export_authority: self.standard_chart_export_authority.clone(),
+                chart_ex_replay: self.chart_ex_replay.clone(),
                 is_chart_ex: self.is_chart_ex,
             })
         };
 
         // Determine anchor mode from position fields
-        let anchor_mode = if self.position.end_row.is_some() && self.position.end_col.is_some() {
-            AnchorMode::TwoCell
-        } else {
-            AnchorMode::OneCell
-        };
+        let anchor_mode =
+            if self.position.absolute_x.is_some() && self.position.absolute_y.is_some() {
+                AnchorMode::Absolute
+            } else if self.position.end_row.is_some() && self.position.end_col.is_some() {
+                AnchorMode::TwoCell
+            } else {
+                AnchorMode::OneCell
+            };
 
         let common = FloatingObjectCommon {
             id: format!("chart-import-{}", index),
@@ -534,6 +586,8 @@ impl ChartSpec {
                 anchor_row_offset: self.position.anchor_row_offset,
                 anchor_col_offset: self.position.anchor_col_offset,
                 anchor_mode,
+                absolute_x: self.position.absolute_x,
+                absolute_y: self.position.absolute_y,
                 end_row: self.position.end_row,
                 end_col: self.position.end_col,
                 end_row_offset: self.position.end_row_offset,
@@ -631,7 +685,6 @@ impl ChartSpec {
             width_pt: self.size.width_pt,
             left_pt: self.size.left_pt,
             top_pt: self.size.top_pt,
-            preserved_chart_xml: self.preserved_chart_xml.clone(),
             // API-exposed fields
             style: self.style,
             rounded_corners: self.rounded_corners,
@@ -650,8 +703,6 @@ impl ChartSpec {
             floor_format: self.floor_format.clone(),
             side_wall_format: self.side_wall_format.clone(),
             back_wall_format: self.back_wall_format.clone(),
-            // Round-trip preservation
-            rt: self.rt.clone(),
             source_table_id: None,
             table_data_columns: None,
             table_category_column: None,

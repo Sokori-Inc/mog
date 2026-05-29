@@ -104,6 +104,16 @@ export interface GridEditingUIStore {
   /** Set the currently selected table */
   setSelectedTable: (tableId: string | null) => void;
 
+  // --- Pivot selection coordination ---
+  /** Pivot field-panel state */
+  pivot: { selectedPivotId: string | null; editingPivotId: string | null };
+  /** Set the currently selected pivot */
+  selectPivot: (pivotId: string | null) => void;
+  /** Open pivot field editing */
+  startEditingPivot: (pivotId: string) => void;
+  /** Close pivot field editing */
+  stopEditingPivot: () => void;
+
   // --- Validation circles coordination ---
   /** Remove a validation circle for a cell */
   removeValidationCircle: (sheetId: string, row: number, col: number) => void;
@@ -778,6 +788,15 @@ export interface EditorDependencies {
     col: number,
     value: string,
   ) => Promise<import('./coordination/editor-commit-coordination').EditorValidationResult | null>;
+  /** Validate direct circular references before the formula reaches the mutation path. */
+  validateCircularReference?: (
+    sheetId: SheetId,
+    row: number,
+    col: number,
+    formula: string,
+  ) => Promise<
+    import('./coordination/editor-commit-coordination').CircularReferenceValidationResult | null
+  >;
   /**
    * Show validation error dialog for strict enforcement.
    * Called when a value fails validation with enforcement='strict'.
@@ -825,6 +844,16 @@ export interface EditorDependencies {
     errorPosition?: number,
   ) => void;
   /**
+   * Show direct circular-reference warning dialog. Enable proceeds after the
+   * host enables iterative calculation; cancel discards the edit.
+   */
+  onCircularReferenceWarning?: (
+    cellAddress: string,
+    formula: string,
+    onEnableIterative: () => void,
+    onCancel: () => void,
+  ) => void;
+  /**
    * Validate formula syntax.
    * G.2: Can return an object with errorPosition for cursor placement.
    * @returns null if valid, string for legacy error, or object with errorMessage and optional errorPosition
@@ -832,6 +861,8 @@ export interface EditorDependencies {
   validateFormulaSyntax?: (
     sheetId: SheetId,
     formula: string,
+    row: number,
+    col: number,
   ) =>
     | string
     | { errorMessage: string; errorPosition?: number }

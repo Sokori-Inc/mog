@@ -855,6 +855,22 @@ export class ComputeCore {
       );
     }
 
+    // Pivot deletion clears the materialized output cells in Rust, but that
+    // clear is not represented as binary mutation patches. Re-read affected
+    // sheet buffers before pivot:deleted subscribers repaint from stale cells.
+    if (result.pivotChanges?.some((change) => change.kind === 'Removed') && this.fetchManager) {
+      const sheetIds = new Set(
+        result.pivotChanges
+          .filter((change) => change.kind === 'Removed')
+          .map((change) => change.sheetId),
+      );
+      await Promise.all(
+        Array.from(sheetIds).map((sheetId) =>
+          this.fetchManager!.forceRefreshSheetViewports(sheetId),
+        ),
+      );
+    }
+
     // Delegate state updates + event emission to handler
     this.mutationHandler?.applyAndNotify(result, 'user', directEdits);
 
@@ -1047,19 +1063,18 @@ export class ComputeCore {
    * Handle a structural change with prefetch invalidation.
    * Called by the structureChange passthrough method.
    *
-   * After this method returns, the viewport buffer is renderable for all
-   * registered viewports. Rust produces complete structural patches via
-   * `produce_structural_viewport_patches()` — no async follow-up is needed
-   * or permitted. The fetch manager's prefetch cache is invalidated so the
-   * next *scroll* fetches fresh data, but no deferred refresh is triggered.
+   * Structural changes invalidate old per-viewport prefetch state before the
+   * Rust mutation runs. After Rust confirms the mutation, forced refresh
+   * commits fresh buffers and re-synchronizes per-viewport bounds before this
+   * method returns, so registered viewports remain renderable and observable.
    */
   async structureChangeWithInvalidation(
     sheetId: SheetId,
     change: StructureChange,
   ): Promise<MutationResult> {
     this.ensureInitialized();
-    // Structural changes always invalidate per-viewport prefetch — marks cache
-    // stale so the next scroll fetches fresh data. This is NOT triggering a fetch.
+    // Mark old prefetch state stale before Rust shifts row/column structure.
+    // The awaited forced refresh below restores fresh buffers and bounds.
     this.invalidateAllViewportPrefetch();
 
     let result: MutationResult;
@@ -1410,6 +1425,19 @@ export class ComputeCore {
   async exportToXlsxBytes(): Promise<Uint8Array> {
     this.ensureInitialized();
     return this.transport.call<Uint8Array>('compute_export_to_xlsx_bytes', {
+      docId: this.docId,
+    });
+  }
+
+  /**
+   * Export the current workbook to XLSX bytes without imported RoundTripContext.
+   *
+   * This is an evaluation-only anti-cheat path: modeled facts should match
+   * normal export while registered opaque subgraphs may differ.
+   */
+  async exportToXlsxBytesContextStripped(): Promise<Uint8Array> {
+    this.ensureInitialized();
+    return this.transport.call<Uint8Array>('compute_export_to_xlsx_bytes_context_stripped', {
       docId: this.docId,
     });
   }

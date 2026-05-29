@@ -179,6 +179,7 @@ export function PageSetupGroup() {
       aria-label="Orientation"
       aria-expanded={isOrientationOpen}
       aria-haspopup="menu"
+      visibilityKey="orientation"
     />
   );
 
@@ -289,7 +290,7 @@ export function PageSetupGroup() {
             dataValue="custom"
             onClick={() => {
               setIsMarginsOpen(false);
-              dispatch('OPEN_PAGE_SETUP_DIALOG');
+              dispatch('OPEN_PAGE_SETUP_DIALOG', { initialTab: 'margins' });
             }}
           >
             Custom Margins...

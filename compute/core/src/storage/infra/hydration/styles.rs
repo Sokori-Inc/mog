@@ -4,10 +4,28 @@ use std::sync::Arc;
 use yrs::{Any, Map, MapPrelim, MapRef, Out};
 
 use domain_types::yrs_schema;
-use domain_types::{CellData, DocumentFormat, SheetData};
+use domain_types::{CellData, DocumentFormat, SheetData, WorkbookStylesheet};
 
 use compute_document::hex::{SmallHex, id_to_hex};
 use compute_document::schema::*;
+
+const KEY_STYLE_REGISTRY_NUMBER_FORMATS: &str = "numberFormats";
+const KEY_STYLE_REGISTRY_FONTS: &str = "fonts";
+const KEY_STYLE_REGISTRY_FILLS: &str = "fills";
+const KEY_STYLE_REGISTRY_BORDERS: &str = "borders";
+const KEY_STYLE_REGISTRY_CELL_STYLE_XFS: &str = "cellStyleXfs";
+const KEY_STYLE_REGISTRY_CELL_XFS: &str = "cellXfs";
+const KEY_STYLE_REGISTRY_NAMED_CELL_STYLES: &str = "namedCellStyles";
+const KEY_STYLE_REGISTRY_DXFS: &str = "differentialFormats";
+const KEY_STYLE_REGISTRY_TABLE_STYLES: &str = "tableStyles";
+const KEY_STYLE_REGISTRY_INDEXED_COLORS: &str = "indexedColors";
+const KEY_STYLE_REGISTRY_DEFAULT_TABLE_STYLE: &str = "defaultTableStyle";
+const KEY_STYLE_REGISTRY_DEFAULT_PIVOT_STYLE: &str = "defaultPivotStyle";
+const KEY_STYLE_REGISTRY_KNOWN_FONTS: &str = "knownFonts";
+const KEY_STYLE_REGISTRY_ROOT_NAMESPACE_ATTRS: &str = "rootNamespaceAttrs";
+const KEY_STYLE_REGISTRY_ROOT_MCE_ATTRIBUTES: &str = "rootMceAttributes";
+const KEY_STYLE_REGISTRY_EXT_LST_XML: &str = "extLstXml";
+const KEY_STYLE_REGISTRY_COUNT: &str = "count";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportedRangeStyle {
@@ -103,6 +121,174 @@ pub(super) fn hydrate_style_palette(
             serde_json::to_string(&cell_fmt).expect("CellFormat serialization should not fail");
         let key = i.to_string();
         palette_map.insert(txn, &*key, Any::String(Arc::from(json.as_str())));
+    }
+}
+
+pub(super) fn hydrate_workbook_stylesheet(
+    txn: &mut yrs::TransactionMut,
+    workbook: &MapRef,
+    workbook_stylesheet: &Option<WorkbookStylesheet>,
+) {
+    if let Some(stylesheet) = workbook_stylesheet {
+        let stylesheet = stylesheet.normalized();
+        hydrate_dxf_registry(txn, workbook, &stylesheet.dxf_registry);
+        let map: MapRef = workbook.insert(
+            txn,
+            KEY_WORKBOOK_STYLESHEET,
+            MapPrelim::from([] as [(&str, Any); 0]),
+        );
+        hydrate_style_registry_vec(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_NUMBER_FORMATS,
+            &stylesheet.number_formats,
+        );
+        hydrate_style_registry_vec(txn, &map, KEY_STYLE_REGISTRY_FONTS, &stylesheet.fonts);
+        hydrate_style_registry_vec(txn, &map, KEY_STYLE_REGISTRY_FILLS, &stylesheet.fills);
+        hydrate_style_registry_vec(txn, &map, KEY_STYLE_REGISTRY_BORDERS, &stylesheet.borders);
+        hydrate_style_registry_vec(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_CELL_STYLE_XFS,
+            &stylesheet.cell_style_xfs,
+        );
+        hydrate_style_registry_vec(txn, &map, KEY_STYLE_REGISTRY_CELL_XFS, &stylesheet.cell_xfs);
+        hydrate_style_registry_vec(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_NAMED_CELL_STYLES,
+            &stylesheet.named_cell_styles,
+        );
+        hydrate_style_registry_vec(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_DXFS,
+            &stylesheet.differential_formats,
+        );
+        hydrate_style_registry_vec(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_TABLE_STYLES,
+            &stylesheet.table_styles,
+        );
+        hydrate_style_registry_value(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_INDEXED_COLORS,
+            &stylesheet.indexed_colors,
+        );
+        hydrate_style_registry_value(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_DEFAULT_TABLE_STYLE,
+            &stylesheet.default_table_style,
+        );
+        hydrate_style_registry_value(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_DEFAULT_PIVOT_STYLE,
+            &stylesheet.default_pivot_style,
+        );
+        map.insert(
+            txn,
+            KEY_STYLE_REGISTRY_KNOWN_FONTS,
+            Any::Bool(stylesheet.known_fonts),
+        );
+        hydrate_style_registry_vec(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_ROOT_NAMESPACE_ATTRS,
+            &stylesheet.root_namespace_attrs,
+        );
+        if !stylesheet.root_mce_attributes.is_empty() {
+            let json = serde_json::to_string(&stylesheet.root_mce_attributes)
+                .expect("style root MCE serialization should not fail");
+            map.insert(
+                txn,
+                KEY_STYLE_REGISTRY_ROOT_MCE_ATTRIBUTES,
+                Any::String(Arc::from(json.as_str())),
+            );
+        }
+        hydrate_style_registry_value(
+            txn,
+            &map,
+            KEY_STYLE_REGISTRY_EXT_LST_XML,
+            &stylesheet.ext_lst_xml,
+        );
+    } else {
+        workbook.remove(txn, KEY_WORKBOOK_STYLESHEET);
+        workbook.remove(txn, KEY_DXF_REGISTRY);
+    }
+}
+
+fn hydrate_dxf_registry(
+    txn: &mut yrs::TransactionMut,
+    workbook: &MapRef,
+    registry: &[domain_types::DxfDef],
+) {
+    if registry.is_empty() {
+        workbook.remove(txn, KEY_DXF_REGISTRY);
+        return;
+    }
+
+    let map: MapRef = workbook.insert(
+        txn,
+        KEY_DXF_REGISTRY,
+        MapPrelim::from([] as [(&str, Any); 0]),
+    );
+    map.insert(
+        txn,
+        KEY_STYLE_REGISTRY_COUNT,
+        Any::Number(registry.len() as f64),
+    );
+    for entry in registry {
+        let json =
+            serde_json::to_string(entry).expect("DXF registry entry serialization should not fail");
+        map.insert(
+            txn,
+            &*entry.id.to_string(),
+            Any::String(Arc::from(json.as_str())),
+        );
+    }
+}
+
+fn hydrate_style_registry_vec<T: serde::Serialize>(
+    txn: &mut yrs::TransactionMut,
+    parent: &MapRef,
+    key: &str,
+    values: &[T],
+) {
+    if values.is_empty() {
+        return;
+    }
+
+    let map: MapRef = parent.insert(txn, key, MapPrelim::from([] as [(&str, Any); 0]));
+    map.insert(
+        txn,
+        KEY_STYLE_REGISTRY_COUNT,
+        Any::Number(values.len() as f64),
+    );
+    for (index, value) in values.iter().enumerate() {
+        let json = serde_json::to_string(value)
+            .expect("style registry entry serialization should not fail");
+        map.insert(
+            txn,
+            &*index.to_string(),
+            Any::String(Arc::from(json.as_str())),
+        );
+    }
+}
+
+fn hydrate_style_registry_value<T: serde::Serialize>(
+    txn: &mut yrs::TransactionMut,
+    parent: &MapRef,
+    key: &str,
+    value: &Option<T>,
+) {
+    if let Some(value) = value {
+        let json = serde_json::to_string(value)
+            .expect("style registry value serialization should not fail");
+        parent.insert(txn, key, Any::String(Arc::from(json.as_str())));
     }
 }
 
@@ -273,8 +459,8 @@ pub(super) fn hydrate_authored_style_runs(
 /// references the workbook-level `stylePalette` map written by
 /// `hydrate_style_palette`.
 ///
-/// Round-trip bookkeeping (cm, vm, formulaResultType, sstIndex,
-/// originalValue) is emitted as sibling keys on the same compact JSON
+/// Round-trip bookkeeping (cm, vm, ph/date lexical hints, formulaResultType,
+/// sstIndex, originalValue) is emitted as sibling keys on the same compact JSON
 /// — the wire shape matches the typed `CellProperties` serde layout so
 /// `properties::resolve_compact_props` can deserialize it directly.
 pub(super) fn hydrate_cell_styles(
@@ -297,16 +483,24 @@ pub(super) fn hydrate_cell_styles(
     for cell in cells {
         let style_is_range_backed = range_style_positions.contains(&(cell.row, cell.col));
         let has_style = cell.style_id.is_some() && !style_is_range_backed;
-        let has_cm = cell.cm;
+        let cell_metadata_index = cell.cell_metadata_index;
+        let has_cm = cell_metadata_index.is_some();
         let has_vm = cell.vm.is_some();
+        let has_phonetic = cell.phonetic;
+        let has_date_lexical_value = cell.date_lexical_value.is_some();
         let has_formula_result_type = cell.formula_result_type.is_some();
+        let has_empty_cached_value = cell.has_empty_cached_value;
         let has_original_sst_index = cell.original_sst_index.is_some();
         let has_original_value = cell.original_value.is_some();
         // Skip cells with neither style nor import/export metadata.
         if !has_style
             && !has_cm
             && !has_vm
+            && !has_phonetic
+            && !has_date_lexical_value
             && !has_formula_result_type
+            && !has_empty_cached_value
+            && cell.formula_cache_provenance.is_absent_or_unknown()
             && !has_original_sst_index
             && !has_original_value
         {
@@ -324,7 +518,10 @@ pub(super) fn hydrate_cell_styles(
         let is_style_only = has_style
             && !has_cm
             && !has_vm
+            && !has_phonetic
+            && !has_date_lexical_value
             && !has_formula_result_type
+            && !has_empty_cached_value
             && !has_original_sst_index
             && !has_original_value;
 
@@ -339,8 +536,8 @@ pub(super) fn hydrate_cell_styles(
         } else {
             // Slow path: build typed CellProperties and serialize. The serde
             // renames on CellProperties produce the wire keys (`s`, `cm`, `vm`,
-            // `formulaResultType`, `sstIndex`, `originalValue`) that the
-            // reader expects.
+            // `formulaResultType`, `hasEmptyCachedValue`, `sstIndex`,
+            // `originalValue`) that the reader expects.
             let props = domain_types::CellProperties {
                 format: None,
                 provenance: None,
@@ -351,9 +548,13 @@ pub(super) fn hydrate_cell_styles(
                 } else {
                     cell.style_id
                 },
-                cm: has_cm,
+                cell_metadata_index,
                 vm: cell.vm,
+                phonetic: cell.phonetic,
+                date_lexical_value: cell.date_lexical_value.clone(),
                 formula_result_type: cell.formula_result_type,
+                has_empty_cached_value,
+                formula_cache_provenance: cell.formula_cache_provenance.clone(),
                 original_sst_index: cell.original_sst_index,
                 original_value: cell.original_value.clone(),
                 // CSE flags are runtime-derived; never set on the

@@ -53,23 +53,41 @@ import {
   parseCellAddress,
   parseCellRange,
 } from '@mog/spreadsheet-utils/a1';
+import type { ParsedCellRange } from '@mog-sdk/contracts/utils';
 
 import { useKeyboardShortcutsDialogStore } from '../../../dialogs/settings/keyboard-shortcuts-dialog-store';
 import type { QuickRuleDialogType } from '../../../ui-store/slices/dialogs/cf-dialog';
+import { isFormatCellsTabId, type FormatCellsTabId } from '../../../ui-store/slices/core/misc';
 
-import { getRelativeCommandColumn, resolveDataDialogTarget } from '../../data-command-target';
+import {
+  getRelativeCommandColumn,
+  resolveDataDialogTarget,
+  resolveTextToColumnsTarget,
+} from '../../data-command-target';
 import { getUIStore, handled, notHandled } from '../handler-utils';
 import { beginEditSessionFromAction } from '../edit-entry';
 import {
   isPickerBackedValidation,
   peekValidationEditorConfig,
 } from '../../../systems/grid-editing/coordination/editor-validation-resolution';
+import { requestFormulaBarRefresh } from '../../../infra/events/formula-bar-refresh';
 
 // =============================================================================
 // Type Guards
 // =============================================================================
 
 const PAPER_SIZES: readonly PaperSize[] = ['letter', 'legal', 'a4', 'a3', 'custom'];
+
+function rangeFromParsedCellRange(parsedRange: ParsedCellRange): CellRange {
+  return {
+    startRow: parsedRange.startRow,
+    startCol: parsedRange.startCol,
+    endRow: parsedRange.endRow,
+    endCol: parsedRange.endCol,
+    ...(parsedRange.isFullColumn ? { isFullColumn: true } : {}),
+    ...(parsedRange.isFullRow ? { isFullRow: true } : {}),
+  };
+}
 
 function isPaperSize(value: string): value is PaperSize {
   return (PAPER_SIZES as readonly string[]).includes(value);
@@ -94,6 +112,16 @@ const QUICK_RULE_TYPES: readonly NonNullable<QuickRuleDialogType>[] = [
 
 function isQuickRuleDialogType(value: string): value is NonNullable<QuickRuleDialogType> {
   return (QUICK_RULE_TYPES as readonly string[]).includes(value);
+}
+
+interface OpenFormatCellsDialogPayload {
+  initialTab?: FormatCellsTabId;
+}
+
+function getFormatCellsInitialTab(payload: unknown): FormatCellsTabId | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const initialTab = (payload as OpenFormatCellsDialogPayload).initialTab;
+  return isFormatCellsTabId(initialTab) ? initialTab : undefined;
 }
 
 // =============================================================================
@@ -268,17 +296,10 @@ export const NAVIGATE_TO_REFERENCE: AsyncActionHandler = async (deps): Promise<A
     // Navigate to range
     // MIGRATION: Uses deps.commands.selection instead of direct actor.send()
     if (deps.commands?.selection) {
-      deps.commands.selection.setSelection(
-        [
-          {
-            startRow: rangeParsed.startRow,
-            startCol: rangeParsed.startCol,
-            endRow: rangeParsed.endRow,
-            endCol: rangeParsed.endCol,
-          },
-        ],
-        { row: rangeParsed.startRow, col: rangeParsed.startCol },
-      );
+      deps.commands.selection.setSelection([rangeFromParsedCellRange(rangeParsed)], {
+        row: rangeParsed.startRow,
+        col: rangeParsed.startCol,
+      });
     }
 
     // Add to recent locations
@@ -324,8 +345,18 @@ export const OPEN_GO_TO_SPECIAL_DIALOG: ActionHandler = (deps): ActionResult => 
  * fonts, borders, fill, and protection.
  * Uses direct UIStore access - handlers should be self-contained.
  */
-export const OPEN_FORMAT_CELLS_DIALOG: ActionHandler = (deps): ActionResult => {
-  getUIStore(deps).getState().openFormatCellsDialog();
+export const OPEN_FORMAT_CELLS_DIALOG: ActionHandler = (deps, payload): ActionResult => {
+  getUIStore(deps).getState().openFormatCellsDialog(getFormatCellsInitialTab(payload));
+  return handled();
+};
+
+/**
+ * Open Font dialog.
+ *
+ * Excel routes this command to the Font tab within Format Cells.
+ */
+export const OPEN_FONT_DIALOG: ActionHandler = (deps): ActionResult => {
+  getUIStore(deps).getState().openFormatCellsDialog('font');
   return handled();
 };
 
@@ -1378,7 +1409,7 @@ export const OPEN_TEXT_TO_COLUMNS_DIALOG: AsyncActionHandler = async (
     return notHandled('disabled');
   }
   const ws = deps.workbook.getSheetById(deps.getActiveSheetId());
-  const target = await resolveDataDialogTarget(ws, ranges[0]);
+  const target = await resolveTextToColumnsTarget(ws, ranges[0]);
   getUIStore(deps).getState().openTextToColumnsDialog({ range: target.range });
   return handled();
 };
@@ -1578,6 +1609,18 @@ export const THESAURUS_INSERT_WORD: AsyncActionHandler = async (
   // Replace entire cell value
   const ws = deps.workbook.getSheetById(sheetId);
   await ws.setCell(activeCell.row, activeCell.col, word);
+  requestFormulaBarRefresh({
+    sheetIds: [sheetId],
+    ranges: [
+      {
+        startRow: activeCell.row,
+        startCol: activeCell.col,
+        endRow: activeCell.row,
+        endCol: activeCell.col,
+      },
+    ],
+  });
+  getUIStore(deps).getState().closeThesaurusDialog?.();
   return handled();
 };
 

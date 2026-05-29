@@ -457,7 +457,7 @@ fn test_pivot_table_xml_basic() {
         .set_location(PivotLocation::new("A3:C10"))
         .add_field(PivotFieldDef {
             axis: Some(PivotAxis::AxisRow),
-            show_all: false,
+            show_all: Some(false),
             items: vec![
                 PivotFieldItem::data(0),
                 PivotFieldItem::data(1),
@@ -468,7 +468,7 @@ fn test_pivot_table_xml_basic() {
         })
         .add_field(PivotFieldDef {
             data_field: true,
-            show_all: false,
+            show_all: Some(false),
             ..Default::default()
         })
         .add_row_field(0)
@@ -500,7 +500,7 @@ fn test_pivot_table_xml_with_row_col_items() {
         .set_location(PivotLocation::new("A3:D10"))
         .add_field(PivotFieldDef {
             axis: Some(PivotAxis::AxisRow),
-            show_all: false,
+            show_all: Some(false),
             items: vec![
                 PivotFieldItem::data(0),
                 PivotFieldItem::data(1),
@@ -510,7 +510,7 @@ fn test_pivot_table_xml_with_row_col_items() {
         })
         .add_field(PivotFieldDef {
             axis: Some(PivotAxis::AxisCol),
-            show_all: false,
+            show_all: Some(false),
             items: vec![
                 PivotFieldItem::data(0),
                 PivotFieldItem::data(1),
@@ -582,6 +582,16 @@ fn test_row_col_item_xml() {
 }
 
 #[test]
+fn test_row_col_item_xml_preserves_middle_blank_refs() {
+    let mut w = XmlWriter::new();
+    let item = RowColItem::data(vec![Some(3), None, Some(75)]);
+    item.write_xml(&mut w);
+    let xml = w.finish_string();
+
+    assert_eq!(xml, r#"<i><x v="3"/><x/><x v="75"/></i>"#);
+}
+
+#[test]
 fn test_row_col_item_grand_xml() {
     let mut w = XmlWriter::new();
     let item = RowColItem::grand();
@@ -603,14 +613,14 @@ fn test_pivot_field_def_default() {
     assert!(!field.data_field);
     assert!(!field.compact);
     assert!(!field.outline);
-    assert!(!field.show_all);
+    assert_eq!(field.show_all, None);
 }
 
 #[test]
 fn test_pivot_field_def_xml_empty() {
     let mut w = XmlWriter::new();
     let field = PivotFieldDef {
-        show_all: false,
+        show_all: Some(false),
         ..Default::default()
     };
     field.write_xml(&mut w);
@@ -625,7 +635,7 @@ fn test_pivot_field_def_xml_with_items() {
     let mut w = XmlWriter::new();
     let field = PivotFieldDef {
         axis: Some(PivotAxis::AxisRow),
-        show_all: false,
+        show_all: Some(false),
         items: vec![PivotFieldItem::data(0), PivotFieldItem::default_item()],
         ..Default::default()
     };
@@ -643,7 +653,7 @@ fn test_pivot_field_def_xml_with_subtotals() {
     let mut w = XmlWriter::new();
     let field = PivotFieldDef {
         axis: Some(PivotAxis::AxisRow),
-        show_all: false,
+        show_all: Some(false),
         subtotals: vec![DataFieldFunction::Sum, DataFieldFunction::Average],
         ..Default::default()
     };

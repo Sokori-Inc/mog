@@ -34,7 +34,13 @@ import type {
 import type { MutationReceipt } from '@mog-sdk/contracts/api';
 import type { ObjectFill, ShapeOutline, ShapeText } from '@mog-sdk/contracts/floating-objects';
 
-import { getUIStore, handled, notHandled } from './handler-utils';
+import {
+  getUIStore,
+  handled,
+  isProtectionRejection,
+  notHandled,
+  showProtectionFeedback,
+} from './handler-utils';
 
 import type { ISheetViewGeometry, ISheetViewViewport } from '@mog-sdk/sheet-view';
 import type { SheetId } from '@mog-sdk/contracts/core';
@@ -48,10 +54,6 @@ const DEFAULT_PICTURE_WIDTH = 200;
 const DEFAULT_PICTURE_HEIGHT = 150;
 const DEFAULT_TEXTBOX_WIDTH = 150;
 const DEFAULT_TEXTBOX_HEIGHT = 75;
-const DEFAULT_CHECKBOX_WIDTH = 96;
-const DEFAULT_CHECKBOX_HEIGHT = 20;
-const DEFAULT_COMBOBOX_WIDTH = 140;
-const DEFAULT_COMBOBOX_HEIGHT = 28;
 
 // =============================================================================
 // Type Helpers
@@ -142,6 +144,25 @@ function getSmartObjectPosition(
     defaultPosition: { anchorRow: 2, anchorCol: 2 },
     ...preset,
   });
+}
+
+/**
+ * Form controls inserted from the ribbon are cell controls, not free-floating
+ * shapes. Excel anchors them to the selected/active cell and links their value
+ * to that same cell.
+ */
+function getSelectedCellPosition(deps: ActionDependencies): { row: number; col: number } {
+  const activeCell = deps.accessors.selection.getActiveCell?.();
+  if (activeCell) {
+    return { row: activeCell.row, col: activeCell.col };
+  }
+
+  const range = deps.accessors.selection.getRanges?.()[0];
+  if (range) {
+    return { row: range.startRow, col: range.startCol };
+  }
+
+  return { row: 0, col: 0 };
 }
 
 // =============================================================================
@@ -745,14 +766,21 @@ export const INSERT_SHAPE: AsyncActionHandler = async (deps, payload): Promise<A
 };
 
 /**
- * Start Shape Insert — enters insertion mode (crosshair cursor, drag to define size).
- * Power-user alternative to INSERT_SHAPE: Shift+click a shape in the menu to draw it.
+ * Start Shape Insert — creates the default visible shape and keeps insertion mode armed
+ * so a follow-up worksheet drag can define an explicitly sized shape.
  * Payload: { shapeType: ShapeType }
  */
-export const START_SHAPE_INSERT: ActionHandler = (deps, payload): ActionResult => {
+export const START_SHAPE_INSERT: AsyncActionHandler = async (
+  deps,
+  payload,
+): Promise<ActionResult> => {
   const { shapeType } = payload || {};
   if (!shapeType) {
     return { handled: false, error: 'Missing shapeType' };
+  }
+  const result = await INSERT_SHAPE(deps, payload);
+  if (!result.handled) {
+    return result;
   }
   deps.commands.object.startInsert(shapeType);
   return handled();
@@ -807,19 +835,24 @@ export const INSERT_FORM_CONTROL_CHECKBOX: AsyncActionHandler = async (
 ): Promise<ActionResult> => {
   const sheetId = deps.getActiveSheetId();
   const ws = deps.workbook.getSheetById(sheetId);
-  const { anchorRow, anchorCol } = getSmartObjectPosition(deps, sheetId, SHAPE_POSITION_PRESET);
+  const position = getSelectedCellPosition(deps);
 
   try {
+    if (!(await ws.protection.canDoStructureOp('editObject'))) {
+      showProtectionFeedback(deps);
+      return notHandled('disabled');
+    }
     deps.workbook.setPendingUndoDescription('Insert checkbox');
     await ws.formControls.addCheckbox({
-      anchor: { row: anchorRow, col: anchorCol },
-      linkedCell: { row: anchorRow, col: anchorCol },
-      label: 'Check Box',
-      width: DEFAULT_CHECKBOX_WIDTH,
-      height: DEFAULT_CHECKBOX_HEIGHT,
+      anchor: position,
+      linkedCell: position,
     });
     return handled();
   } catch (err) {
+    if (isProtectionRejection(err)) {
+      showProtectionFeedback(deps, (err as Error).message);
+      return notHandled('disabled');
+    }
     return { handled: false, error: (err as Error).message };
   }
 };
@@ -833,20 +866,26 @@ export const INSERT_FORM_CONTROL_COMBOBOX: AsyncActionHandler = async (
 ): Promise<ActionResult> => {
   const sheetId = deps.getActiveSheetId();
   const ws = deps.workbook.getSheetById(sheetId);
-  const { anchorRow, anchorCol } = getSmartObjectPosition(deps, sheetId, SHAPE_POSITION_PRESET);
+  const position = getSelectedCellPosition(deps);
 
   try {
+    if (!(await ws.protection.canDoStructureOp('editObject'))) {
+      showProtectionFeedback(deps);
+      return notHandled('disabled');
+    }
     deps.workbook.setPendingUndoDescription('Insert combo box');
     await ws.formControls.addComboBox({
-      anchor: { row: anchorRow, col: anchorCol },
-      linkedCell: { row: anchorRow, col: anchorCol },
+      anchor: position,
+      linkedCell: position,
       items: ['Option 1', 'Option 2', 'Option 3'],
       placeholder: 'Select',
-      width: DEFAULT_COMBOBOX_WIDTH,
-      height: DEFAULT_COMBOBOX_HEIGHT,
     });
     return handled();
   } catch (err) {
+    if (isProtectionRejection(err)) {
+      showProtectionFeedback(deps, (err as Error).message);
+      return notHandled('disabled');
+    }
     return { handled: false, error: (err as Error).message };
   }
 };

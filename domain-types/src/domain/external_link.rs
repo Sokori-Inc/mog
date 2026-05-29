@@ -66,6 +66,13 @@ pub struct ExternalLink {
     /// Each entry is (rId, Target, Type).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_rels: Vec<ExternalLinkExtraRel>,
+    /// Typed external-link-owned relationships.
+    ///
+    /// These records are live workbook state. Imported relationship IDs and
+    /// order are provenance hints for these records, not a second source of
+    /// truth for export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relationships: Vec<ExternalLinkRelationship>,
     /// OOXML package identity captured during import.
     ///
     /// This is the durable mapping from workbook.xml `<externalReference r:id>`
@@ -74,6 +81,9 @@ pub struct ExternalLink {
     /// not by the `externalLinkN.xml` file number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_identity: Option<ImportedExternalLinkIdentity>,
+    /// Preserved extension-list XML owned by the externalLink part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_lst_xml: Option<String>,
 }
 
 impl ExternalLink {
@@ -99,7 +109,11 @@ impl ExternalLink {
     pub fn dde(id: String, service: String, topic: String) -> Self {
         Self {
             id,
-            link_type: ExternalLinkType::Dde { service, topic },
+            link_type: ExternalLinkType::Dde {
+                service,
+                topic,
+                items: Vec::new(),
+            },
             ..Default::default()
         }
     }
@@ -108,7 +122,11 @@ impl ExternalLink {
     pub fn ole(id: String, prog_id: String) -> Self {
         Self {
             id,
-            link_type: ExternalLinkType::Ole { prog_id },
+            link_type: ExternalLinkType::Ole {
+                prog_id,
+                r_id: None,
+                items: Vec::new(),
+            },
             ..Default::default()
         }
     }
@@ -124,10 +142,71 @@ pub enum ExternalLinkType {
     Dde {
         service: String,
         topic: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<DdeItem>,
     },
     Ole {
         prog_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<OleItem>,
     },
+}
+
+/// DDE item/channel metadata and cached values.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DdeItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub ole: bool,
+    #[serde(default)]
+    pub advise: bool,
+    #[serde(default)]
+    pub prefer_pic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<DdeValue>,
+}
+
+/// One cached DDE value.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DdeValue {
+    #[serde(default)]
+    pub value_type: DdeValueType,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// DDE cached value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DdeValueType {
+    Nil,
+    Boolean,
+    #[default]
+    Number,
+    Error,
+    String,
+}
+
+/// OLE item metadata exposed by an OLE link.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OleItem {
+    pub name: String,
+    #[serde(default)]
+    pub icon: bool,
+    #[serde(default)]
+    pub advise: bool,
+    #[serde(default)]
+    pub prefer_pic: bool,
 }
 
 /// Extra relationship not matched by standard rId references.
@@ -137,6 +216,57 @@ pub struct ExternalLinkExtraRel {
     pub id: String,
     pub target: String,
     pub rel_type: String,
+}
+
+/// A live relationship owned by an `externalLink*.xml` part.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalLinkRelationship {
+    /// Stable local source key used by body role bindings. This is distinct
+    /// from imported or emitted `rId` values.
+    pub source_key: String,
+    /// Imported relationship ID, when the current record was reconstructed
+    /// from an XLSX package relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_id_hint: Option<String>,
+    /// OOXML relationship type URI.
+    pub relationship_type: String,
+    /// Relationship target as live state.
+    pub target: String,
+    /// TargetMode from the relationship row. External workbook path
+    /// relationships normally use `External`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_mode: Option<String>,
+    /// Imported order within the owning `.rels` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    /// Semantic body roles that refer to this relationship.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<ExternalLinkRelationshipRole>,
+    /// Currentness decision for imported provenance.
+    #[serde(default)]
+    pub currentness: ExternalLinkRelationshipCurrentness,
+}
+
+/// Semantic use of an external-link-owned relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExternalLinkRelationshipRole {
+    ExternalBook,
+    AlternateAbsoluteUrl,
+    AlternateRelativeUrl,
+    ExtraPath,
+}
+
+/// Whether imported provenance is still eligible for reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExternalLinkRelationshipCurrentness {
+    #[default]
+    Current,
+    Regenerated,
+    DroppedStale,
+    DroppedUnsupported,
 }
 
 /// Imported OOXML external-link package identity.

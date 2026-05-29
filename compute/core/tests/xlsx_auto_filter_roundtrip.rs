@@ -60,6 +60,7 @@ fn rich_auto_filter() -> AutoFilter {
                         date_time_grouping: DateTimeGrouping::Day,
                     }],
                 }),
+                ext_lst_raw: None,
             },
             FilterColumn {
                 col_index: 1,
@@ -71,6 +72,7 @@ fn rich_auto_filter() -> AutoFilter {
                     value: 15.0,
                     filter_val: Some(73.5),
                 }),
+                ext_lst_raw: None,
             },
             FilterColumn {
                 col_index: 2,
@@ -84,6 +86,7 @@ fn rich_auto_filter() -> AutoFilter {
                     }],
                     and_logic: false,
                 }),
+                ext_lst_raw: None,
             },
             FilterColumn {
                 col_index: 3,
@@ -96,6 +99,7 @@ fn rich_auto_filter() -> AutoFilter {
                     value_iso: Some("2025-04-23T10:00:00Z".to_string()),
                     max_value_iso: None,
                 }),
+                ext_lst_raw: None,
             },
             FilterColumn {
                 col_index: 4,
@@ -105,6 +109,7 @@ fn rich_auto_filter() -> AutoFilter {
                     dxf_id: Some(7),
                     cell_color: false,
                 }),
+                ext_lst_raw: None,
             },
             FilterColumn {
                 col_index: 5,
@@ -114,6 +119,7 @@ fn rich_auto_filter() -> AutoFilter {
                     icon_set: Some("3TrafficLights1".to_string()),
                     icon_id: 2,
                 }),
+                ext_lst_raw: None,
             },
         ],
         sort: Some(SortState {
@@ -133,6 +139,7 @@ fn rich_auto_filter() -> AutoFilter {
             ..Default::default()
         }),
         xr_uid: Some("{DEADBEEF-0000-0000-0000-000000000042}".to_string()),
+        ext_lst_raw: None,
     }
 }
 
@@ -170,14 +177,14 @@ fn rich_auto_filter_survives_hydrate_export_roundtrip() {
     // Serialize → parse round-trip gives us the XLSX bytes we then hydrate
     // through the engine (the production path).
     let xlsx_bytes =
-        write_xlsx_from_parse_output(&parse_output, None).expect("write_xlsx_from_parse_output");
+        write_xlsx_from_parse_output(&parse_output).expect("write_xlsx_from_parse_output");
 
     let (engine, _) = YrsComputeEngine::from_xlsx_bytes(&xlsx_bytes).expect("from_xlsx_bytes");
 
     // Export back out. The canonical check: the re-exported XLSX must still
     // contain <autoFilter with the original ref.
     let exported = engine.export_to_xlsx_bytes().expect("export_to_xlsx_bytes");
-    let (reparsed, _ctx, _diags) =
+    let (reparsed, _diags) =
         xlsx_parser::parse_xlsx_to_output(&exported).expect("parse_xlsx_to_output");
 
     let af_rt = reparsed.sheets[0]
@@ -202,7 +209,7 @@ fn rich_auto_filter_survives_hydrate_export_roundtrip() {
             blanks,
             ..
         }) => {
-            assert_eq!(*calendar_type, Some(CalendarType::Japan));
+            assert_eq!(calendar_type, &Some(CalendarType::Japan));
             assert!(*blanks);
             assert_eq!(date_group_items.len(), 1);
             assert_eq!(
@@ -214,7 +221,7 @@ fn rich_auto_filter_survives_hydrate_export_roundtrip() {
     }
     match &af_rt.columns[1].filter_type {
         Some(OoxmlFilterType::Top10 { filter_val, .. }) => {
-            assert_eq!(*filter_val, Some(73.5));
+            assert_eq!(filter_val, &Some(73.5));
         }
         other => panic!("col 1 should be Top10, got {other:?}"),
     }
@@ -222,22 +229,22 @@ fn rich_auto_filter_survives_hydrate_export_roundtrip() {
         Some(OoxmlFilterType::Dynamic {
             value, value_iso, ..
         }) => {
-            assert_eq!(*value, Some(42.5));
+            assert_eq!(value, &Some(42.5));
             assert_eq!(value_iso.as_deref(), Some("2025-04-23T10:00:00Z"));
         }
         other => panic!("col 3 should be Dynamic, got {other:?}"),
     }
     match &af_rt.columns[4].filter_type {
         Some(OoxmlFilterType::Color { dxf_id, cell_color }) => {
-            assert_eq!(*dxf_id, Some(7));
-            assert!(!*cell_color);
+            assert_eq!(dxf_id, &Some(7));
+            assert!(!cell_color);
         }
         other => panic!("col 4 should be Color, got {other:?}"),
     }
     match &af_rt.columns[5].filter_type {
         Some(OoxmlFilterType::Icon { icon_set, icon_id }) => {
             assert_eq!(icon_set.as_deref(), Some("3TrafficLights1"));
-            assert_eq!(*icon_id, 2);
+            assert_eq!(icon_id, &2);
         }
         other => panic!("col 5 should be Icon, got {other:?}"),
     }
@@ -265,6 +272,7 @@ fn childless_and_explicit_empty_values_filters_survive_hydrate_export_roundtrip(
                 hidden_button: true,
                 show_button: false,
                 filter_type: None,
+                ext_lst_raw: None,
             },
             FilterColumn {
                 col_index: 1,
@@ -279,14 +287,15 @@ fn childless_and_explicit_empty_values_filters_survive_hydrate_export_roundtrip(
         ],
         sort: None,
         xr_uid: None,
+        ext_lst_raw: None,
     };
     let parse_output = build_parse_output_with_filter(af.clone());
     let xlsx_bytes =
-        write_xlsx_from_parse_output(&parse_output, None).expect("write_xlsx_from_parse_output");
+        write_xlsx_from_parse_output(&parse_output).expect("write_xlsx_from_parse_output");
 
     let (engine, _) = YrsComputeEngine::from_xlsx_bytes(&xlsx_bytes).expect("from_xlsx_bytes");
     let exported = engine.export_to_xlsx_bytes().expect("export_to_xlsx_bytes");
-    let (reparsed, _ctx, _diags) =
+    let (reparsed, _diags) =
         xlsx_parser::parse_xlsx_to_output(&exported).expect("parse_xlsx_to_output");
 
     let af_rt = reparsed.sheets[0]
@@ -317,14 +326,15 @@ fn simple_auto_filter_survives_when_no_column_filters() {
         columns: Vec::new(),
         sort: None,
         xr_uid: None,
+        ext_lst_raw: None,
     };
     let parse_output = build_parse_output_with_filter(af.clone());
 
     let xlsx_bytes =
-        write_xlsx_from_parse_output(&parse_output, None).expect("write_xlsx_from_parse_output");
+        write_xlsx_from_parse_output(&parse_output).expect("write_xlsx_from_parse_output");
     let (engine, _) = YrsComputeEngine::from_xlsx_bytes(&xlsx_bytes).expect("from_xlsx_bytes");
     let exported = engine.export_to_xlsx_bytes().expect("export_to_xlsx_bytes");
-    let (reparsed, _ctx, _diags) =
+    let (reparsed, _diags) =
         xlsx_parser::parse_xlsx_to_output(&exported).expect("parse_xlsx_to_output");
 
     let af_rt = reparsed.sheets[0]

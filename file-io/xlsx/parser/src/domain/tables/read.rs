@@ -12,11 +12,18 @@
 #![allow(clippy::string_slice)]
 
 use crate::domain::tables;
-use crate::infra::scanner::{extract_quoted_value, find_attr_simd, find_gt_simd, find_tag_simd};
+use crate::infra::opc::{PackageOwner, WorksheetRelationships, parse_owned_relationships};
 use crate::output::results::{
     ParsedCellRange, ParsedTable, ParsedTableColumn, ParsedTableSortCondition, ParsedTableSortState,
 };
 use crate::zip::XlsxArchive;
+
+#[derive(Debug, Clone)]
+struct TableRelationshipRef {
+    id: String,
+    target: String,
+    path: String,
+}
 
 /// Parse tables for a sheet, returning both the structured `ParsedTable` list and
 /// raw XML bytes keyed by their archive path (for round-trip passthrough).
@@ -33,8 +40,8 @@ pub fn parse_tables_for_sheet(
 
     // Read the relationship file for this sheet
     let rels_path = format!("xl/worksheets/_rels/sheet{}.xml.rels", sheet_num);
-    let mut table_paths = if let Ok(rels_xml) = archive.read_file(&rels_path) {
-        extract_table_targets(&rels_xml)
+    let mut table_relationships = if let Ok(rels_xml) = archive.read_file(&rels_path) {
+        extract_table_relationships_for_sheet(sheet_num, &rels_xml)
     } else {
         Vec::new()
     };
@@ -43,23 +50,21 @@ pub fn parse_tables_for_sheet(
     // of how the .rels XML orders the Relationship elements. Without this,
     // tables get written to wrong file paths when the rels order differs from
     // the natural table numbering (e.g., rels lists table9 before table3).
-    table_paths.sort_by_key(|path| extract_table_number(path).unwrap_or(u32::MAX));
+    table_relationships.sort_by_key(|rel| extract_table_number(&rel.path).unwrap_or(u32::MAX));
 
     // Parse each referenced table
-    for table_rel_path in &table_paths {
-        // Relationship targets are relative to the worksheet directory,
-        // e.g., "../tables/table1.xml" -> "xl/tables/table1.xml"
-        let table_path = resolve_table_path(table_rel_path);
-        if let Ok(table_xml) = archive.read_file(&table_path) {
+    for table_rel in &table_relationships {
+        let table_rel_path = &table_rel.path;
+        if let Ok(table_xml) = archive.read_file(table_rel_path) {
             // Store raw bytes for round-trip passthrough before parsing
-            raw_passthroughs.push((table_path.clone(), table_xml.clone()));
+            raw_passthroughs.push((table_rel_path.clone(), table_xml.clone()));
 
             // Also capture the table's own .rels file if it exists.
             // e.g., xl/tables/table1.xml -> xl/tables/_rels/table1.xml.rels
             // These connect tables to external data sources (query tables, etc.).
-            if let Some(slash_pos) = table_path.rfind('/') {
-                let dir = &table_path[..slash_pos];
-                let filename = &table_path[slash_pos + 1..];
+            if let Some(slash_pos) = table_rel_path.rfind('/') {
+                let dir = &table_rel_path[..slash_pos];
+                let filename = &table_rel_path[slash_pos + 1..];
                 let table_rels_path = format!("{}/_rels/{}.rels", dir, filename);
                 if let Ok(table_rels_xml) = archive.read_file(&table_rels_path) {
                     raw_passthroughs.push((table_rels_path, table_rels_xml));
@@ -67,7 +72,22 @@ pub fn parse_tables_for_sheet(
             }
 
             if let Some(table) = tables::Table::parse(&table_xml) {
-                if let Some(parsed) = convert_table_to_parsed(&table) {
+                if let Some(mut parsed) = convert_table_to_parsed(&table) {
+                    parsed.worksheet_relationship_id_hint = Some(table_rel.id.clone());
+                    parsed.table_part_path_hint = Some(table_rel.path.clone());
+                    parsed.worksheet_relationship_target_hint = Some(table_rel.target.clone());
+                    parsed.query_table =
+                        crate::domain::connections::query_table_relationship_for_table(
+                            archive,
+                            table_rel_path,
+                        )
+                        .and_then(|(relationship_id, path)| {
+                            crate::domain::connections::parse_query_table_for_path(
+                                archive,
+                                &path,
+                                Some(relationship_id),
+                            )
+                        });
                     tables_vec.push(parsed);
                 }
             }
@@ -77,44 +97,46 @@ pub fn parse_tables_for_sheet(
     (tables_vec, raw_passthroughs)
 }
 
-/// Extract table relationship targets from a .rels XML file.
-///
-/// Looks for `<Relationship>` elements whose `Type` attribute ends with
-/// `/table` and returns their `Target` attribute values.
+fn extract_table_relationships_for_sheet(
+    sheet_num: usize,
+    rels_xml: &[u8],
+) -> Vec<TableRelationshipRef> {
+    let relationships = parse_owned_relationships(
+        PackageOwner::Worksheet {
+            sheet_index: sheet_num,
+            path: format!("xl/worksheets/sheet{}.xml", sheet_num),
+        },
+        rels_xml,
+    );
+    WorksheetRelationships::new(&relationships)
+        .tables()
+        .into_iter()
+        .filter_map(|rel| {
+            rel.target.path().map(|path| TableRelationshipRef {
+                id: rel.id.clone(),
+                target: rel.target.raw().to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Extract table relationship targets from a .rels XML file using exact OOXML
+/// relationship classification.
+#[cfg(test)]
 fn extract_table_targets(rels_xml: &[u8]) -> Vec<String> {
-    let mut targets = Vec::new();
-    let mut pos = 0;
-
-    while let Some(rel_start) = find_tag_simd(rels_xml, b"Relationship", pos) {
-        let rel_end = find_gt_simd(rels_xml, rel_start)
-            .map(|p| p + 1)
-            .unwrap_or(rels_xml.len());
-        let rel_elem = &rels_xml[rel_start..rel_end];
-
-        // Check if Type contains "/table"
-        if let Some(type_pos) = find_attr_simd(rel_elem, b"Type=\"", 0) {
-            let value_start = type_pos + 6; // len of 'Type="'
-            if let Some((start, end)) = extract_quoted_value(rel_elem, value_start) {
-                let type_str = &rel_elem[start..end];
-                // Match both the full namespace URI and just "/table" suffix
-                if type_str.ends_with(b"/table") {
-                    // Extract Target attribute
-                    if let Some(target_pos) = find_attr_simd(rel_elem, b"Target=\"", 0) {
-                        let tgt_start = target_pos + 8; // len of 'Target="'
-                        if let Some((ts, te)) = extract_quoted_value(rel_elem, tgt_start) {
-                            if let Ok(target) = std::str::from_utf8(&rel_elem[ts..te]) {
-                                targets.push(target.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        pos = rel_end;
-    }
-
-    targets
+    let relationships = parse_owned_relationships(
+        PackageOwner::Worksheet {
+            sheet_index: 0,
+            path: "xl/worksheets/sheet1.xml".to_string(),
+        },
+        rels_xml,
+    );
+    WorksheetRelationships::new(&relationships)
+        .tables()
+        .into_iter()
+        .map(|rel| rel.target.raw().to_string())
+        .collect()
 }
 
 /// Extract the numeric table index from a table path like `../tables/table5.xml` → 5.
@@ -132,6 +154,7 @@ fn extract_table_number(path: &str) -> Option<u32> {
 /// - `../tables/table1.xml` -> `xl/tables/table1.xml`
 /// - `tables/table1.xml` -> `xl/worksheets/tables/table1.xml`
 /// - `/xl/tables/table1.xml` -> `xl/tables/table1.xml`
+#[cfg(test)]
 pub(crate) fn resolve_table_path(rel_path: &str) -> String {
     if rel_path.starts_with('/') {
         // Absolute path from archive root
@@ -210,6 +233,7 @@ fn convert_table_to_parsed(table: &tables::Table) -> Option<ParsedTable> {
                     },
                     unique_name: c.unique_name.clone(),
                     query_table_field_id: c.query_table_field_id,
+                    xml_column_pr: c.xml_column_pr.clone(),
                     xr3_uid: c.xr3_uid.clone(),
                 }
             })
@@ -244,6 +268,10 @@ fn convert_table_to_parsed(table: &tables::Table) -> Option<ParsedTable> {
         totals_row_cell_style: table.totals_row_cell_style.clone(),
         auto_filter_ref: table.auto_filter.as_ref().map(|af| af.ref_range.clone()),
         auto_filter_xr_uid: table.auto_filter.as_ref().and_then(|af| af.xr_uid.clone()),
+        auto_filter_ext_lst_raw: table
+            .auto_filter
+            .as_ref()
+            .and_then(|af| af.ext_lst_raw.clone()),
         table_type: if table.table_type != TableType::Worksheet {
             Some(table.table_type.to_ooxml().to_string())
         } else {
@@ -251,12 +279,17 @@ fn convert_table_to_parsed(table: &tables::Table) -> Option<ParsedTable> {
         },
         totals_row_shown: table.totals_row_shown,
         connection_id: table.connection_id,
+        comment: table.comment.clone(),
         insert_row: table.insert_row,
         insert_row_shift: table.insert_row_shift,
         published: table.published,
         xr_uid: table.xr_uid.clone(),
         sort_state: convert_table_sort_state(table),
         filter_columns: convert_filter_columns(table),
+        query_table: None,
+        worksheet_relationship_id_hint: None,
+        table_part_path_hint: None,
+        worksheet_relationship_target_hint: None,
     })
 }
 
@@ -273,6 +306,8 @@ fn convert_filter_columns(table: &tables::Table) -> Vec<domain_types::FilterColu
                 domain_types::FilterSpec::Values {
                     blank: f.blank,
                     values: f.values.clone(),
+                    calendar_type: f.calendar_type,
+                    date_group_items: f.date_group_items.clone(),
                 }
             } else if let Some(ref cf) = fc.custom_filters {
                 domain_types::FilterSpec::Custom {
@@ -319,6 +354,7 @@ fn convert_filter_columns(table: &tables::Table) -> Vec<domain_types::FilterColu
                 hidden_button: fc.hidden_button,
                 show_button: fc.show_button,
                 filter,
+                ext_lst_raw: fc.ext_lst_raw.clone(),
             })
         })
         .collect()
@@ -336,15 +372,32 @@ fn convert_table_sort_state(table: &tables::Table) -> Option<ParsedTableSortStat
 
     Some(ParsedTableSortState {
         ref_range: ss.ref_range.clone(),
+        column_sort: ss.column_sort,
         case_sensitive: ss.case_sensitive,
+        sort_method: ss.sort_method,
         conditions: ss
             .sort_conditions
             .iter()
             .map(|sc| ParsedTableSortCondition {
                 ref_range: sc.ref_range.clone(),
                 descending: sc.descending,
+                sort_by: match sc.sort_by {
+                    ooxml_types::tables::SortBy::Value => domain_types::SortConditionBy::Value,
+                    ooxml_types::tables::SortBy::CellColor => {
+                        domain_types::SortConditionBy::CellColor
+                    }
+                    ooxml_types::tables::SortBy::FontColor => {
+                        domain_types::SortConditionBy::FontColor
+                    }
+                    ooxml_types::tables::SortBy::Icon => domain_types::SortConditionBy::Icon,
+                },
+                custom_list: sc.custom_list.clone(),
+                dxf_id: sc.dxf_id,
+                icon_set: sc.icon_set,
+                icon_id: sc.icon_id,
             })
             .collect(),
+        ext_lst_raw: ss.ext_lst_raw.clone(),
     })
 }
 
@@ -386,6 +439,16 @@ mod tests {
         let rels_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings" Target="../printerSettings/printerSettings1.bin"/>
+</Relationships>"#;
+        let targets = extract_table_targets(rels_xml);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn test_extract_table_targets_rejects_near_miss_relationship_type() {
+        let rels_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://example.invalid/relationships/custom-table" Target="../tables/table1.xml"/>
 </Relationships>"#;
         let targets = extract_table_targets(rels_xml);
         assert!(targets.is_empty());

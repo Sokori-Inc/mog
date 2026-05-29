@@ -2,7 +2,9 @@
 //!
 //! These types model the `xdr:wsDr` element tree for drawing objects embedded in
 //! spreadsheet worksheets. Extension lists (`extLst`) are intentionally omitted;
-//! they will be preserved as opaque XML during roundtrip.
+//! parser/writer code owns any raw preservation and relationship validation.
+//! Unsupported object choices may be preserved opaquely only when the owning
+//! anchor/group and drawing relationships remain valid.
 
 use super::{
     BlipFill, CellAnchor, ClientData, Connection, DrawingLocking, EditAs, Extent, GroupLocking,
@@ -33,6 +35,24 @@ pub enum DrawingAnchor {
     OneCell(OneCellAnchor),
     /// Object with absolute positioning (CT_AbsoluteAnchor).
     Absolute(AbsoluteAnchor),
+}
+
+/// Parse/export metadata owned by the sheet drawing anchor sequence.
+///
+/// `anchor_index` is the ordinal of an `xdr:*Anchor` inside `xdr:wsDr`. It is
+/// not an OOXML attribute; it is bridge metadata used to map the ordered XML
+/// sequence to domain floating-object layer state.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawingAnchorMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_index: Option<usize>,
+}
+
+impl DrawingAnchorMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.anchor_index.is_none()
+    }
 }
 
 // =============================================================================

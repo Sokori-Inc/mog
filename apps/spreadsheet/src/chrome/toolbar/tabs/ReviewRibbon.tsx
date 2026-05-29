@@ -24,6 +24,7 @@ import {
 } from '@mog-sdk/contracts/ribbon';
 import { useComments } from '../../../hooks/comments/use-comments';
 import { useSheetProtection } from '../../../hooks/structure/use-sheet-protection';
+import { useWorkbookStructureProtection } from '../../../hooks/structure/use-workbook-protection';
 import { useActionDependencies } from '../../../hooks/toolbar/use-action-dependencies';
 import { keyTipRegistry } from '../keytips';
 import { RibbonButton } from '../primitives/RibbonButton';
@@ -203,6 +204,7 @@ export function ReviewRibbon() {
   const activeSheetId = useUIStore((s) => s.activeSheetId);
   const { protection } = useSheetProtection(activeSheetId);
   const isProtected = protection.isProtected;
+  const isWorkbookStructureProtected = useWorkbookStructureProtection();
 
   // Protection button handlers
   const handleProtectSheet = useCallback(() => {
@@ -427,6 +429,7 @@ export function ReviewRibbon() {
               disabled={!hasComments}
               title="Show/Hide Comment"
               aria-label="Show/Hide Comment"
+              visibilityKey="showHideComment"
             />
             <RibbonButton
               id="review-show-all-comments"
@@ -439,6 +442,7 @@ export function ReviewRibbon() {
               title={showAllComments ? 'Hide All Comments' : 'Show All Comments'}
               aria-label="Show All Comments"
               aria-pressed={showAllComments}
+              visibilityKey="showComments"
             />
           </div>
         </div>
@@ -462,16 +466,21 @@ export function ReviewRibbon() {
             onClick={handleProtectSheet}
             title={isProtected ? 'Unprotect Sheet' : 'Protect Sheet'}
             aria-label={isProtected ? 'Unprotect Sheet' : 'Protect Sheet'}
+            visibilityKey="protectSheet"
           />
           <RibbonButton
             id="review-protect-workbook"
             layout="vertical"
             height="full"
             icon={<ProtectWorkbookIcon />}
-            label={'Protect\nWorkbook'}
+            label={isWorkbookStructureProtected ? 'Unprotect\nWorkbook' : 'Protect\nWorkbook'}
             onClick={handleProtectWorkbook}
-            title="Protect Workbook (structure protection)"
-            aria-label="Protect Workbook"
+            title={
+              isWorkbookStructureProtected
+                ? 'Unprotect Workbook'
+                : 'Protect Workbook (structure protection)'
+            }
+            aria-label={isWorkbookStructureProtected ? 'Unprotect Workbook' : 'Protect Workbook'}
           />
           <RibbonButton
             layout="vertical"
@@ -481,6 +490,7 @@ export function ReviewRibbon() {
             disabled
             title="Always Open Read-Only (coming soon)"
             aria-label="Always Open Read-Only"
+            visibilityKey="alwaysOpenReadOnly"
           />
         </div>
       </ToolbarGroup>

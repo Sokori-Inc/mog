@@ -51,11 +51,14 @@ export type RibbonTabId =
   | 'view'
   | 'table-design'
   | 'chart-design'
+  | 'chart-format'
   | 'picture-tools'
   | 'slicer-tools'
   | 'sparkline-tools'
   | 'diagram-design'
-  | 'diagram-format';
+  | 'diagram-format'
+  | 'pivot-analyze'
+  | 'pivot-design';
 
 /** Payload for SWITCH_RIBBON_TAB action — typed argument carried via KeyboardShortcut.actionArg. */
 export interface SwitchRibbonTabPayload {
@@ -1207,6 +1210,7 @@ export type DataAnalysisDialogActionType =
   | 'EXECUTE_GOAL_SEEK'
   | 'APPLY_GOAL_SEEK_RESULT'
   | 'CANCEL_GOAL_SEEK'
+  | 'OPEN_FORECAST_SHEET_DIALOG'
   // Consolidate Dialog
   | 'OPEN_CONSOLIDATE_DIALOG'
   | 'CLOSE_CONSOLIDATE_DIALOG'

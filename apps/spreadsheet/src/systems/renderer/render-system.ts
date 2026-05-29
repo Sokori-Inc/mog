@@ -33,6 +33,7 @@ import type {
   RendererAccessor,
   RendererState as RendererSelectorState,
 } from '@mog-sdk/contracts/actors';
+import { sheetId as toSheetId } from '@mog-sdk/contracts/core';
 import type {
   CellCoord,
   FrozenPanes,
@@ -58,6 +59,8 @@ import {
   setupViewportFollowCoordination,
   type SelectionActor as ViewportFollowSelectionActor,
 } from './coordination/viewport-follow-coordination';
+import { getSelectionSnapshot } from '../grid-editing/machines/selection/derived-state';
+import { calculateZoomToSelection } from '../../infra/utils/zoom-to-selection';
 import { lifecycleDebug } from './debug/debug-lifecycle';
 import type { PageBreakDragState } from './execution/render-context-coordination';
 import {
@@ -214,6 +217,9 @@ export class RenderSystem implements IRenderSystem {
    * the selection actor becomes available; disposed in dispose().
    */
   private viewportFollowCleanup: (() => void) | null = null;
+
+  /** Selection actor retained for renderer-owned commands such as Zoom to Selection. */
+  private selectionActor: ViewportFollowSelectionActor | null = null;
 
   /** Previous renderer state for transition detection */
   private previousRendererState: string | null = null;
@@ -380,8 +386,57 @@ export class RenderSystem implements IRenderSystem {
   }
 
   zoomToSelection(): void {
-    // TODO: Implement zoom-to-selection logic
-    // Requires selection snapshot and coordinate system to calculate bounds
+    if (this.disposed || !this.started) return;
+
+    const geometry = this.getGeometry();
+    const viewport = this.getViewport();
+    if (!geometry || !viewport || !this.selectionActor) return;
+
+    const selection = getSelectionSnapshot(this.selectionActor.getSnapshot());
+    const selectionRange = selection.ranges[0] ?? {
+      startRow: selection.activeCell.row,
+      startCol: selection.activeCell.col,
+      endRow: selection.activeCell.row,
+      endCol: selection.activeCell.col,
+    };
+    const range = {
+      startRow: Math.min(selectionRange.startRow, selectionRange.endRow),
+      startCol: Math.min(selectionRange.startCol, selectionRange.endCol),
+      endRow: Math.max(selectionRange.startRow, selectionRange.endRow),
+      endCol: Math.max(selectionRange.startCol, selectionRange.endCol),
+    };
+
+    let rects = geometry.getRangeRects(range);
+    if (rects.length === 0) {
+      const scrollTarget = viewport.getScrollToCell(selection.activeCell);
+      if (scrollTarget) {
+        this.rendererExecution?.setScrollPosition(scrollTarget);
+        this.rendererExecution?.getDependencies()?.onScrollPositionReset?.(scrollTarget);
+        rects = geometry.getRangeRects(range);
+      }
+    }
+    if (rects.length === 0) return;
+
+    const viewportBounds = viewport.getViewportBounds();
+    const target = calculateZoomToSelection({
+      selection: range,
+      viewportWidth: viewportBounds.width,
+      viewportHeight: viewportBounds.height,
+      positionDimensions: geometry.getPositionDimensions(),
+      padding: 32,
+      headerVisibility: geometry.getHeaderVisibility(),
+    });
+
+    this.setZoom(target.zoom);
+    const sheetId = this.getRenderCapability()?.getCurrentSheetId();
+    if (sheetId) {
+      this.config.sheetSwitchDeps?.uiStoreApi
+        .getState()
+        .setZoomLevel?.(toSheetId(sheetId), target.zoom);
+    }
+    const targetScroll = viewport.clampScrollPosition({ x: target.scrollX, y: target.scrollY });
+    this.rendererExecution?.setScrollPosition(targetScroll);
+    this.rendererExecution?.getDependencies()?.onScrollPositionReset?.(targetScroll);
   }
 
   applyCellLevelScroll(topRow: number, leftCol: number): void {
@@ -590,6 +645,7 @@ export class RenderSystem implements IRenderSystem {
    */
   setSelectionActorForViewportFollow(selectionActor: ViewportFollowSelectionActor): void {
     if (this.disposed) return;
+    this.selectionActor = selectionActor;
     if (this.viewportFollowCleanup) {
       this.viewportFollowCleanup();
       this.viewportFollowCleanup = null;
@@ -686,6 +742,9 @@ export class RenderSystem implements IRenderSystem {
         },
         setFrozenPanes: (panes) => {
           this.rendererExecution?.setFrozenPanes(panes);
+        },
+        setViewportConfig: (config) => {
+          this.rendererExecution?.setViewportConfig(config);
         },
       });
     }

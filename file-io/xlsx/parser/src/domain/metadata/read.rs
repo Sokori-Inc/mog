@@ -9,7 +9,7 @@
 
 use crate::output::results::{
     CellMetadataBlock, CellMetadataRecord, FutureMetadataBlock, FutureMetadataGroup,
-    MetadataOutput, MetadataTypeOutput,
+    MetadataOutput, MetadataTypeOutput, ValueMetadataBlock,
 };
 
 use crate::pipeline::full_parse::extract_attr_value;
@@ -33,11 +33,13 @@ pub(crate) fn parse_metadata(xml: &[u8]) -> MetadataOutput {
     let metadata_types = parse_metadata_types(xml_str);
     let future_metadata = parse_future_metadata(xml_str);
     let cell_metadata = parse_cell_metadata(xml_str);
+    let value_metadata = parse_value_metadata(xml_str);
 
     MetadataOutput {
         metadata_types,
         future_metadata,
         cell_metadata,
+        value_metadata,
     }
 }
 
@@ -80,23 +82,42 @@ fn parse_metadata_types(xml: &str) -> Vec<MetadataTypeOutput> {
         if let Some(v) = extract_attr_value(tag, "minSupportedVersion") {
             mt.min_supported_version = v.parse().unwrap_or(0);
         }
-        mt.copy = extract_attr_value(tag, "copy").as_deref() == Some("1");
-        mt.paste_all = extract_attr_value(tag, "pasteAll").as_deref() == Some("1");
-        mt.paste_values = extract_attr_value(tag, "pasteValues").as_deref() == Some("1");
-        mt.merge = extract_attr_value(tag, "merge").as_deref() == Some("1");
-        mt.split_first = extract_attr_value(tag, "splitFirst").as_deref() == Some("1");
-        mt.row_col_shift = extract_attr_value(tag, "rowColShift").as_deref() == Some("1");
-        mt.clear_formats = extract_attr_value(tag, "clearFormats").as_deref() == Some("1");
-        mt.clear_comments = extract_attr_value(tag, "clearComments").as_deref() == Some("1");
-        mt.assign = extract_attr_value(tag, "assign").as_deref() == Some("1");
-        mt.coerce = extract_attr_value(tag, "coerce").as_deref() == Some("1");
-        mt.cell_meta = extract_attr_value(tag, "cellMeta").as_deref() == Some("1");
+        mt.copy = attr_bool(tag, "copy");
+        mt.paste_all = attr_bool(tag, "pasteAll");
+        mt.paste_values = attr_bool(tag, "pasteValues");
+        mt.merge = attr_bool(tag, "merge");
+        mt.split_first = attr_bool(tag, "splitFirst");
+        mt.row_col_shift = attr_bool(tag, "rowColShift");
+        mt.clear_formats = attr_bool(tag, "clearFormats");
+        mt.clear_comments = attr_bool(tag, "clearComments");
+        mt.assign = attr_bool(tag, "assign");
+        mt.coerce = attr_bool(tag, "coerce");
+        mt.cell_meta = attr_bool(tag, "cellMeta");
+        mt.ghost_row = attr_bool(tag, "ghostRow");
+        mt.ghost_col = attr_bool(tag, "ghostCol");
+        mt.edit = attr_bool(tag, "edit");
+        mt.delete = attr_bool(tag, "delete");
+        mt.paste_formulas = attr_bool(tag, "pasteFormulas");
+        mt.paste_formats = attr_bool(tag, "pasteFormats");
+        mt.paste_comments = attr_bool(tag, "pasteComments");
+        mt.paste_data_validation = attr_bool(tag, "pasteDataValidation");
+        mt.paste_borders = attr_bool(tag, "pasteBorders");
+        mt.paste_col_widths = attr_bool(tag, "pasteColWidths");
+        mt.paste_number_formats = attr_bool(tag, "pasteNumberFormats");
+        mt.split_all = attr_bool(tag, "splitAll");
+        mt.clear_all = attr_bool(tag, "clearAll");
+        mt.clear_contents = attr_bool(tag, "clearContents");
+        mt.adjust = attr_bool(tag, "adjust");
 
         result.push(mt);
         pos = tag_end;
     }
 
     result
+}
+
+fn attr_bool(tag: &str, name: &str) -> bool {
+    matches!(extract_attr_value(tag, name).as_deref(), Some("1" | "true"))
 }
 
 /// Parse `<futureMetadata>` sections.
@@ -151,13 +172,28 @@ fn parse_future_metadata(xml: &str) -> Vec<FutureMetadataGroup> {
 
 /// Parse `<cellMetadata>` section.
 fn parse_cell_metadata(xml: &str) -> Vec<CellMetadataBlock> {
+    parse_metadata_block_list(xml, "cellMetadata")
+        .into_iter()
+        .map(|records| CellMetadataBlock { records })
+        .collect()
+}
+
+fn parse_value_metadata(xml: &str) -> Vec<ValueMetadataBlock> {
+    parse_metadata_block_list(xml, "valueMetadata")
+        .into_iter()
+        .map(|records| ValueMetadataBlock { records })
+        .collect()
+}
+
+fn parse_metadata_block_list(xml: &str, element_name: &str) -> Vec<Vec<CellMetadataRecord>> {
     let mut result = Vec::new();
 
-    let section_start = match xml.find("<cellMetadata") {
+    let section_start = match xml.find(&format!("<{element_name}")) {
         Some(pos) => pos,
         None => return result,
     };
-    let section_end = match xml[section_start..].find("</cellMetadata>") {
+    let close = format!("</{element_name}>");
+    let section_end = match xml[section_start..].find(&close) {
         Some(pos) => section_start + pos,
         None => return result,
     };
@@ -199,7 +235,7 @@ fn parse_cell_metadata(xml: &str) -> Vec<CellMetadataBlock> {
             rc_pos = rc_tag_end;
         }
 
-        result.push(CellMetadataBlock { records });
+        result.push(records);
         bk_pos = bk_end + "</bk>".len();
     }
 

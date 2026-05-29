@@ -290,6 +290,7 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
   // when this dialog opens/closes (render isolation per ARCHITECTURE-CHECKLIST.md Section 14)
   const isOpen = useUIStore((s) => s.pageSetupDialogOpen);
   const storeInitialTab = useUIStore((s) => s.pageSetupDialogInitialTab);
+  const rangeSelectionMode = useUIStore((s) => s.rangeSelectionMode);
   const effectiveInitialTab = initialTab ?? storeInitialTab;
 
   // Get action dependencies for dispatch()
@@ -569,6 +570,11 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
   }, [deps]);
 
   const guardedEnter = useRangeSelectionEnterGuard(handleOK);
+  const isPickingPrintTitleRange =
+    rangeSelectionMode.active &&
+    rangeSelectionMode.sourceDialogId === 'page-setup-dialog' &&
+    (rangeSelectionMode.sourceInputId === 'repeat-rows' ||
+      rangeSelectionMode.sourceInputId === 'repeat-cols');
 
   // Early return if not open - prevents expensive rendering
   // All hooks must be called before this point (rules of hooks)
@@ -581,6 +587,8 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
       onClose={handleCancel}
       dialogId="page-setup-dialog"
       width={480}
+      closeOnOverlayClick={!isPickingPrintTitleRange}
+      allowPointerEventsBehind={isPickingPrintTitleRange}
     >
       <DialogHeader onClose={handleCancel}>Page Setup</DialogHeader>
 
@@ -705,6 +713,7 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
                   <span className="text-caption text-ss-text-secondary w-[50px]">Top</span>
                   <Input
                     type="number"
+                    aria-label="Top"
                     className="w-[60px] h-8 px-2 py-0 text-center"
                     value={margins.top}
                     onChange={(e) => handleMarginChange('top', e.target.value)}
@@ -716,6 +725,7 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
                   <span className="text-caption text-ss-text-secondary w-[50px]">Bottom</span>
                   <Input
                     type="number"
+                    aria-label="Bottom"
                     className="w-[60px] h-8 px-2 py-0 text-center"
                     value={margins.bottom}
                     onChange={(e) => handleMarginChange('bottom', e.target.value)}
@@ -727,6 +737,7 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
                   <span className="text-caption text-ss-text-secondary w-[50px]">Left</span>
                   <Input
                     type="number"
+                    aria-label="Left"
                     className="w-[60px] h-8 px-2 py-0 text-center"
                     value={margins.left}
                     onChange={(e) => handleMarginChange('left', e.target.value)}
@@ -738,6 +749,7 @@ export function PageSetupDialog({ initialTab }: PageSetupDialogProps) {
                   <span className="text-caption text-ss-text-secondary w-[50px]">Right</span>
                   <Input
                     type="number"
+                    aria-label="Right"
                     className="w-[60px] h-8 px-2 py-0 text-center"
                     value={margins.right}
                     onChange={(e) => handleMarginChange('right', e.target.value)}

@@ -43,14 +43,26 @@
 pub mod types;
 pub mod writer;
 
+mod borders;
+mod cell_styles;
+mod colors;
+mod dxfs;
+mod fills;
+mod fonts;
+mod number_formats;
+mod root;
+mod table_styles;
+mod xfs;
+
 #[cfg(test)]
 mod tests;
 
 // Re-export all public types
-pub use types::{
-    AlignmentDef, BorderDef, BorderSideDef, BorderStyle, CellXfDef, ColorDef, FillDef, FontDef,
-    FontScheme, GradientStop, GradientType, HorizontalAlign, NumberFormatDef, PatternType,
-    ProtectionDef, UnderlineStyle, VerticalAlign, VerticalAlignRun,
+pub use super::types::{
+    AlignmentDef, BorderDef, BorderSideDef, BorderStyle, CellStyleDef, CellXfDef, ColorDef,
+    ColorsDef, DxfDef, FillDef, FontDef, FontScheme, GradientStop, GradientType, HorizontalAlign,
+    NumberFormatDef, PatternType, ProtectionDef, Stylesheet, TableStyleDef, TableStyleElementDef,
+    TableStyleType, UnderlineStyle, VerticalAlign, VerticalAlignRun,
 };
 
-pub use writer::StylesWriter;
+pub use writer::{StyleRootNamespaces, StylesWriter};

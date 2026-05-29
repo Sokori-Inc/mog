@@ -100,6 +100,7 @@ jest.unstable_mockModule('../worksheet/operations/dependency-operations', () => 
 }));
 jest.unstable_mockModule('../worksheet/operations/validation-operations', () => ({
   getDropdownItems: jest.fn(),
+  resolveDropdownItems: jest.fn(),
 }));
 jest.unstable_mockModule('../worksheet/operations/filter-operations', () => ({}));
 jest.unstable_mockModule('../worksheet/operations/shape-operations', () => ({}));
@@ -310,6 +311,7 @@ function createMockCtx(): any {
       setThreadResolved: jest.fn().mockResolvedValue(undefined),
       getCommentThread: jest.fn().mockResolvedValue([]),
       getSheetVisibility: jest.fn().mockResolvedValue('visible'),
+      tableValidateTableName: jest.fn().mockResolvedValue({ valid: true }),
       getAllTablesInSheet: jest.fn().mockResolvedValue([]),
       mergeRange: jest.fn().mockResolvedValue(undefined),
       unmergeRange: jest.fn().mockResolvedValue(undefined),

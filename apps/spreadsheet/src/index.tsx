@@ -31,6 +31,8 @@ import { getEnvVar } from '@mog/env';
 import type { DocumentHandle } from '@mog-sdk/kernel';
 import { sheetId as toSheetId } from '@mog-sdk/contracts/core';
 import type { WorkbookInternal } from '@mog-sdk/contracts/api';
+import type { RibbonVisibilityConfig } from '@mog-sdk/contracts/ribbon';
+import { getRibbonVisibilityProfile, mergeRibbonVisibilityConfig } from '@mog-sdk/contracts/ribbon';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
@@ -39,6 +41,7 @@ import {
   useDocumentManagerOptional,
   useShellStore,
   useShellStoreApi,
+  getImportedPivotMetadata,
 } from '@mog/shell';
 import type { AppAppearanceMode, AppProps } from '@mog/shell/apps';
 import type { FeatureGates } from '@mog-sdk/contracts/feature-gates';
@@ -64,6 +67,10 @@ import {
 } from './infra/context';
 import { useCoordinator } from './hooks/shared/use-coordinator';
 import { createSpreadsheetEmbedAppBridge } from './infra/embed/create-spreadsheet-embed-app-bridge';
+import {
+  resolveInitialActiveSheetId,
+  subscribeActiveSheetPersistence,
+} from './infra/document-active-sheet';
 import { createShellUIStore, type UIStoreApi } from './ui-store';
 // Import SpreadsheetCoordinatorProvider and SpreadsheetGrid from local components
 import { SpreadsheetCoordinatorProvider } from './app/CoordinatorProvider';
@@ -83,9 +90,15 @@ import { DialogLayer, OverlayLayer, PanelLayer } from './chrome/layers';
 // Read-only mode safety net for dispatcher
 import { setDispatcherReadOnly } from './actions/dispatcher';
 import { ensureMetricCompatibleFontsLoaded } from './infra/styles/fonts';
+import { installImportedPivotRuntime } from './pivot/imported-pivot-runtime';
 
 type DocumentRuntime = Pick<DocumentContextValue, 'workbook' | 'uiStore' | 'eventBus'>;
 type SpreadsheetAppAppearanceMode = AppAppearanceMode & SpreadsheetDisplayMode;
+
+const RIBBON_VISIBILITY_PROFILE_ENV = 'MOG_RIBBON_VISIBILITY_PROFILE';
+const VITE_RIBBON_VISIBILITY_PROFILE_ENV = 'VITE_MOG_RIBBON_VISIBILITY_PROFILE';
+const RIBBON_VISIBILITY_CONFIG_JSON_ENV = 'MOG_RIBBON_VISIBILITY_CONFIG_JSON';
+const VITE_RIBBON_VISIBILITY_CONFIG_JSON_ENV = 'VITE_MOG_RIBBON_VISIBILITY_CONFIG_JSON';
 
 // DocumentManager owns handles across React remounts. Keep the workbook facade
 // and UI store with that handle so transient app remounts do not reset dialogs,
@@ -110,6 +123,7 @@ async function getOrCreateDocumentRuntime(handle: DocumentHandle): Promise<Docum
         getActiveObjectType: () => null,
       },
     });
+    installImportedPivotRuntime(workbook as WorkbookInternal, getImportedPivotMetadata(handle));
     try {
       performance.mark('spreadsheetApp:createWorkbook:end');
       performance.measure(
@@ -119,6 +133,14 @@ async function getOrCreateDocumentRuntime(handle: DocumentHandle): Promise<Docum
       );
     } catch {
       /* marks may be cleared by React strict-mode effect cleanup */
+    }
+
+    const restoredActiveSheetId = await resolveInitialActiveSheetId({
+      workbook: workbook as WorkbookInternal,
+      initialSheetId: handle.initialSheetId,
+    });
+    if (restoredActiveSheetId !== uiStore.getState().activeSheetId) {
+      uiStore.getState().setActiveSheet(restoredActiveSheetId);
     }
 
     return {
@@ -183,6 +205,17 @@ function SpreadsheetEmbedRuntimeBridge(): null {
   return null;
 }
 
+function ActiveSheetPersistenceBridge(): null {
+  const workbook = useWorkbook();
+  const uiStore = useUIStoreApi();
+
+  useEffect(() => {
+    return subscribeActiveSheetPersistence({ workbook, uiStore });
+  }, [workbook, uiStore]);
+
+  return null;
+}
+
 /**
  * SpreadsheetApp - The default spreadsheet experience
  *
@@ -216,7 +249,10 @@ export default function SpreadsheetApp({
   // Feature gates: merge prop-level gates with legacy readOnly/hideRibbon props and env vars
   // Memoize to stabilize the reference — `?? {}` creates a new object every render,
   // which would cause the document-init useEffect to re-fire infinitely.
-  const featureGates: FeatureGates = useMemo(() => featureGatesProp ?? {}, [featureGatesProp]);
+  const featureGates: FeatureGates = useMemo(
+    () => resolveFeatureGatesWithRibbonVisibilityProfile(featureGatesProp),
+    [featureGatesProp],
+  );
 
   // Read-only mode: featureGates.editing takes precedence, then legacy prop, then env var, then default false
   const readOnly =
@@ -427,10 +463,50 @@ export default function SpreadsheetApp({
           appearanceMode={appearanceMode as SpreadsheetAppAppearanceMode | undefined}
           onAppearanceModeChange={onAppearanceModeChange}
         />
+        <ActiveSheetPersistenceBridge />
         <SpreadsheetContent key={handle.documentId} />
       </FeatureGatesProvider>
     </DocumentContext.Provider>
   );
+}
+
+function resolveFeatureGatesWithRibbonVisibilityProfile(
+  featureGates: FeatureGates | undefined,
+): FeatureGates {
+  const profileName =
+    getEnvVar(VITE_RIBBON_VISIBILITY_PROFILE_ENV) ?? getEnvVar(RIBBON_VISIBILITY_PROFILE_ENV);
+  const profile = getRibbonVisibilityProfile(profileName);
+  const envConfig = parseRibbonVisibilityConfigEnv(
+    getEnvVar(VITE_RIBBON_VISIBILITY_CONFIG_JSON_ENV) ??
+      getEnvVar(RIBBON_VISIBILITY_CONFIG_JSON_ENV),
+  );
+  const ribbonVisibility = mergeRibbonVisibilityConfig(
+    mergeRibbonVisibilityConfig(profile, envConfig),
+    featureGates?.ribbonVisibility,
+  );
+  return {
+    ...(featureGates ?? {}),
+    ribbonVisibility,
+  };
+}
+
+function parseRibbonVisibilityConfigEnv(
+  value: string | undefined | null,
+): RibbonVisibilityConfig | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.warn(
+        `[SpreadsheetApp] ${VITE_RIBBON_VISIBILITY_CONFIG_JSON_ENV} must be a JSON object`,
+      );
+      return undefined;
+    }
+    return parsed as RibbonVisibilityConfig;
+  } catch (err) {
+    console.warn(`[SpreadsheetApp] Failed to parse ${VITE_RIBBON_VISIBILITY_CONFIG_JSON_ENV}`, err);
+    return undefined;
+  }
 }
 
 function SpreadsheetAppearanceBridge({

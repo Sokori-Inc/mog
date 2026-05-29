@@ -1,6 +1,6 @@
 use yrs::{Any, Map, MapPrelim, MapRef, Transact};
 
-use domain_types::{ParseOutput, RoundTripContext};
+use domain_types::ParseOutput;
 
 use compute_document::hex::id_to_hex;
 use compute_document::schema::*;
@@ -18,12 +18,18 @@ use value_types::ComputeError;
 
 use crate::storage::YrsStorage;
 
+use super::data_tables::hydrate_data_table_regions_from_parse_output;
 use super::sheet::{SheetIdAllocation, hydrate_sheet, hydrate_sheet_with_allocation};
-use super::styles::{ImportedRangeStyle, hydrate_style_palette};
+use super::styles::{ImportedRangeStyle, hydrate_style_palette, hydrate_workbook_stylesheet};
 use super::workbook::{
-    hydrate_workbook_calculation, hydrate_workbook_metadata, hydrate_workbook_named_ranges,
-    hydrate_workbook_parsed_pivot_tables, hydrate_workbook_protection, hydrate_workbook_slicers,
-    hydrate_workbook_tables, hydrate_workbook_theme,
+    hydrate_custom_workbook_views_xml, hydrate_package_fidelity_metadata,
+    hydrate_shared_string_hints, hydrate_volatile_dependency_part, hydrate_workbook_calculation,
+    hydrate_workbook_connections, hydrate_workbook_metadata, hydrate_workbook_named_ranges,
+    hydrate_workbook_parsed_pivot_tables, hydrate_workbook_pivot_cache_records,
+    hydrate_workbook_pivot_cache_sources, hydrate_workbook_protection,
+    hydrate_workbook_root_namespaces, hydrate_workbook_slicers, hydrate_workbook_table_styles,
+    hydrate_workbook_tables, hydrate_workbook_theme, hydrate_workbook_threaded_comment_persons,
+    hydrate_workbook_timelines, hydrate_workbook_views, hydrate_workbook_web_publishing,
 };
 use super::{HydrationIdMap, IdAllocator};
 
@@ -39,17 +45,17 @@ impl YrsStorage {
     /// the persisted workbook link registry and imported cache maps.
     pub(crate) fn hydrate_imported_external_links(
         &mut self,
-        round_trip_ctx: &RoundTripContext,
+        external_links: &[ExternalLink],
     ) -> Result<(), ComputeError> {
-        if round_trip_ctx.external_links.is_empty() {
+        if external_links.is_empty() {
             return Ok(());
         }
 
         let mut txn = self.doc.transact_mut();
         let destination_workbook_id =
-            ensure_imported_workbook_identity(&mut txn, &self.workbook, round_trip_ctx)?;
+            ensure_imported_workbook_identity(&mut txn, &self.workbook, external_links)?;
 
-        for link in &round_trip_ctx.external_links {
+        for link in external_links {
             let Some(identity) = &link.imported_identity else {
                 let artifact = imported_external_package_artifact(&destination_workbook_id, link)?;
                 write_imported_external_package_artifact(&mut txn, &self.workbook, &artifact)
@@ -122,6 +128,7 @@ impl YrsStorage {
         // Write the style palette to a workbook-level Yrs map so that compact
         // cell properties (`{"s": N}`) can resolve their format at read time.
         hydrate_style_palette(&mut txn, &self.workbook, &output.style_palette);
+        hydrate_workbook_stylesheet(&mut txn, &self.workbook, &output.workbook_stylesheet);
 
         for sheet_data in &output.sheets {
             let (
@@ -183,6 +190,19 @@ impl YrsStorage {
             })
             .collect();
         hydrate_workbook_tables(&self.workbook, &all_tables, &mut txn);
+        hydrate_workbook_connections(&self.workbook, &output.connections, &mut txn);
+        hydrate_workbook_root_namespaces(
+            &self.workbook,
+            &output.workbook_root_namespaces,
+            &mut txn,
+        );
+        hydrate_workbook_table_styles(
+            &self.workbook,
+            &output.custom_table_styles,
+            &output.default_table_style,
+            &output.default_pivot_style,
+            &mut txn,
+        );
         hydrate_workbook_theme(&self.workbook, &output.theme, &mut txn);
         hydrate_workbook_protection(&self.workbook, &output.protection, &mut txn);
 
@@ -195,21 +215,52 @@ impl YrsStorage {
             &output.slicer_caches,
             &mut txn,
         );
+        hydrate_workbook_timelines(
+            &self.workbook,
+            &output.sheets,
+            &id_map.sheet_ids,
+            &output.timeline_caches,
+            &mut txn,
+        );
 
         // Hydrate pivot tables at workbook level (serialized as ParsedPivotTable JSON).
         // TODO: Remove workbook-level pivot hydration — pivots are stored per-sheet.
         hydrate_workbook_parsed_pivot_tables(&self.workbook, &output.pivot_tables, &mut txn);
+        hydrate_workbook_pivot_cache_sources(&self.workbook, &output.pivot_cache_sources, &mut txn);
+        hydrate_workbook_pivot_cache_records(&self.workbook, &output.pivot_cache_records, &mut txn);
 
         hydrate_workbook_calculation(&self.workbook, &output.calculation, &mut txn);
+        hydrate_workbook_views(&self.workbook, &output.workbook_views, &mut txn);
+        hydrate_custom_workbook_views_xml(
+            &self.workbook,
+            &output.custom_workbook_views_xml,
+            &mut txn,
+        );
+        hydrate_workbook_web_publishing(&self.workbook, &output.web_publishing, &mut txn);
+        hydrate_workbook_threaded_comment_persons(
+            &self.workbook,
+            &output.persons,
+            output.has_persons_part,
+            &mut txn,
+        );
+        hydrate_shared_string_hints(&self.workbook, &output.shared_string_hints, &mut txn);
+        hydrate_package_fidelity_metadata(&self.workbook, &output.package_fidelity, &mut txn);
+        hydrate_volatile_dependency_part(
+            &self.workbook,
+            &output.volatile_dependency_part,
+            &mut txn,
+        );
         hydrate_workbook_metadata(
             &self.workbook,
             &output.workbook_properties,
             &output.properties,
+            &output.extended_properties,
+            &output.metadata,
             &output.file_version,
             &output.file_sharing,
             &mut txn,
         );
-        // TODO: Hydrate data_table_regions
+        hydrate_data_table_regions_from_parse_output(&self.workbook, output, &id_map, &mut txn);
 
         // Stamp schema version — import always creates a new document.
         write_schema_version(&mut txn, &self.workbook);
@@ -247,6 +298,7 @@ impl YrsStorage {
         let order_arr = self.ensure_sheet_order_array(&mut txn);
         tracing::info!(target: "deferred_hydration", "hydrate: style palette");
         hydrate_style_palette(&mut txn, &self.workbook, &output.style_palette);
+        hydrate_workbook_stylesheet(&mut txn, &self.workbook, &output.workbook_stylesheet);
         tracing::info!(target: "deferred_hydration", "hydrate: sheets start, count={}", output.sheets.len());
 
         for (sheet_idx, sheet_data) in output.sheets.iter().enumerate() {
@@ -382,6 +434,11 @@ impl YrsStorage {
             })
             .collect();
         hydrate_workbook_tables(&self.workbook, &all_tables, &mut txn);
+        hydrate_workbook_root_namespaces(
+            &self.workbook,
+            &output.workbook_root_namespaces,
+            &mut txn,
+        );
         hydrate_workbook_theme(&self.workbook, &output.theme, &mut txn);
         hydrate_workbook_protection(&self.workbook, &output.protection, &mut txn);
         hydrate_workbook_slicers(
@@ -391,16 +448,48 @@ impl YrsStorage {
             &output.slicer_caches,
             &mut txn,
         );
+        hydrate_workbook_timelines(
+            &self.workbook,
+            &output.sheets,
+            &id_map.sheet_ids,
+            &output.timeline_caches,
+            &mut txn,
+        );
         hydrate_workbook_parsed_pivot_tables(&self.workbook, &output.pivot_tables, &mut txn);
+        hydrate_workbook_pivot_cache_sources(&self.workbook, &output.pivot_cache_sources, &mut txn);
+        hydrate_workbook_pivot_cache_records(&self.workbook, &output.pivot_cache_records, &mut txn);
         hydrate_workbook_calculation(&self.workbook, &output.calculation, &mut txn);
+        hydrate_workbook_views(&self.workbook, &output.workbook_views, &mut txn);
+        hydrate_custom_workbook_views_xml(
+            &self.workbook,
+            &output.custom_workbook_views_xml,
+            &mut txn,
+        );
+        hydrate_workbook_web_publishing(&self.workbook, &output.web_publishing, &mut txn);
+        hydrate_workbook_threaded_comment_persons(
+            &self.workbook,
+            &output.persons,
+            output.has_persons_part,
+            &mut txn,
+        );
+        hydrate_shared_string_hints(&self.workbook, &output.shared_string_hints, &mut txn);
+        hydrate_package_fidelity_metadata(&self.workbook, &output.package_fidelity, &mut txn);
+        hydrate_volatile_dependency_part(
+            &self.workbook,
+            &output.volatile_dependency_part,
+            &mut txn,
+        );
         hydrate_workbook_metadata(
             &self.workbook,
             &output.workbook_properties,
             &output.properties,
+            &output.extended_properties,
+            &output.metadata,
             &output.file_version,
             &output.file_sharing,
             &mut txn,
         );
+        hydrate_data_table_regions_from_parse_output(&self.workbook, output, &id_map, &mut txn);
 
         write_schema_version(&mut txn, &self.workbook);
 
@@ -416,7 +505,7 @@ const WORKBOOK_IMPORT_NAMESPACE: uuid::Uuid =
 fn ensure_imported_workbook_identity(
     txn: &mut yrs::TransactionMut<'_>,
     workbook: &MapRef,
-    round_trip_ctx: &RoundTripContext,
+    external_links: &[ExternalLink],
 ) -> Result<WorkbookId, ComputeError> {
     if let Some(metadata) =
         read_workbook_metadata(txn, workbook).map_err(|err| ComputeError::Deserialize {
@@ -426,8 +515,7 @@ fn ensure_imported_workbook_identity(
         return Ok(metadata.workbook_id);
     }
 
-    let identity_seed = round_trip_ctx
-        .external_links
+    let identity_seed = external_links
         .iter()
         .map(|link| {
             link.imported_identity
@@ -499,7 +587,7 @@ fn imported_identity_from_domain(
 }
 
 fn source_kind_for_external_link(link: &ExternalLink) -> PersistedWorkbookLinkSourceKind {
-    match link.link_type {
+    match &link.link_type {
         ExternalLinkType::Workbook => PersistedWorkbookLinkSourceKind::ExcelWorkbook,
         ExternalLinkType::Dde { .. } => PersistedWorkbookLinkSourceKind::DdeLink,
         ExternalLinkType::Ole { .. } => PersistedWorkbookLinkSourceKind::OleLink,
@@ -523,11 +611,11 @@ fn persisted_target_for_external_link(
                 PersistedLinkTarget::OoxmlExternalPath { target }
             }
         }
-        ExternalLinkType::Dde { service, topic } => PersistedLinkTarget::OpaqueHostToken {
+        ExternalLinkType::Dde { service, topic, .. } => PersistedLinkTarget::OpaqueHostToken {
             namespace: "ooxml-dde".to_string(),
             token: stable_opaque_token(&format!("{service}\u{1f}{topic}")),
         },
-        ExternalLinkType::Ole { prog_id } => PersistedLinkTarget::OpaqueHostToken {
+        ExternalLinkType::Ole { prog_id, .. } => PersistedLinkTarget::OpaqueHostToken {
             namespace: "ooxml-ole".to_string(),
             token: stable_opaque_token(prog_id),
         },

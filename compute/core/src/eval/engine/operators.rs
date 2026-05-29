@@ -205,8 +205,8 @@ pub(in crate::eval) fn eval_binary_op(op: BinOp, left: &CellValue, right: &CellV
         BinOp::Gt => CellValue::Boolean(cell_value_cmp(left, right) > 0),
         BinOp::Lte => CellValue::Boolean(cell_value_cmp(left, right) <= 0),
         BinOp::Gte => CellValue::Boolean(cell_value_cmp(left, right) >= 0),
-        // Intersection operator is not yet produced by the parser.
-        // When implemented, it will resolve overlapping ranges at eval time.
+        // Value-level fallback only. Valid reference intersections are resolved
+        // by the evaluator before their operands are materialized.
         BinOp::Intersect => CellValue::Error(CellError::Null, None),
     }
 }
@@ -340,6 +340,7 @@ pub(in crate::eval) fn cell_value_cmp(a: &CellValue, b: &CellValue) -> i32 {
                     CellValue::Error(..) => 4,
                     CellValue::Array(_) => 5,
                     CellValue::Control(_) => 3, // coerces to Boolean
+                    CellValue::Image(_) => 5,
                 }
             }
             (type_rank(a) as i32) - (type_rank(b) as i32)
@@ -393,6 +394,7 @@ pub(in crate::eval) fn cell_value_cmp_for_lookup(a: &CellValue, b: &CellValue) -
             CellValue::Error(..) => 4,
             CellValue::Array(_) => 5,
             CellValue::Control(_) => 3, // coerces to Boolean
+            CellValue::Image(_) => 5,
         }
     }
 

@@ -107,7 +107,7 @@ impl CellValue {
                 }
             }
             CellValue::Error(e, _) => Err(*e),
-            CellValue::Array(_) => Err(CellError::Value),
+            CellValue::Array(_) | CellValue::Image(_) => Err(CellError::Value),
             CellValue::Control(c) => Ok(if c.value { 1.0 } else { 0.0 }),
         }
     }
@@ -129,6 +129,7 @@ impl CellValue {
             CellValue::Error(e, _) => Err(*e),
             CellValue::Array(_) => Err(CellError::Value),
             CellValue::Control(c) => Ok(Cow::Borrowed(if c.value { "TRUE" } else { "FALSE" })),
+            CellValue::Image(image) => Ok(Cow::Borrowed(image.fallback_text())),
         }
     }
 
@@ -161,7 +162,7 @@ impl CellValue {
                 }
             }
             CellValue::Error(e, _) => Err(*e),
-            CellValue::Array(_) => Err(CellError::Value),
+            CellValue::Array(_) | CellValue::Image(_) => Err(CellError::Value),
             CellValue::Control(c) => Ok(c.value),
         }
     }
@@ -473,6 +474,22 @@ mod tests {
     }
 
     // === Date parsing through coerce_to_number ===
+
+    #[test]
+    fn coerce_to_number_datetime_ampm() {
+        let v = CellValue::Text("01/30/2026 03:50 PM".into());
+        let n = v.coerce_to_number().unwrap();
+        assert!((n - 46_052.659_722_222_22).abs() < 1e-6);
+    }
+
+    #[test]
+    fn coerce_to_number_datetime_ampm_arithmetic() {
+        // Simulates the workbook pattern: "01/30/2026 03:50 PM" - 0.25
+        let v = CellValue::Text("01/30/2026 03:50 PM".into());
+        let n = v.coerce_to_number().unwrap();
+        let result = n - 0.25;
+        assert!((result - 46_052.409_722_222_22).abs() < 1e-6);
+    }
 
     #[test]
     fn as_comparable_number_scientific_notation() {

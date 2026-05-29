@@ -94,12 +94,15 @@ fn roundtrip_comprehensive() {
                     hidden: false,
                     best_fit: false,
                     collapsed: false,
+                    phonetic: false,
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
             ..Default::default()
         }],
         style_palette: vec![bold, highlighted],
+        workbook_stylesheet: None,
         named_ranges: vec![NamedRange {
             name: "Totals".to_string(),
             refers_to: "Report!$C$2:$C$3".to_string(),

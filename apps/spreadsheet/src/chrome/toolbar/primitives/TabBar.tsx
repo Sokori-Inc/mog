@@ -22,6 +22,7 @@ import { keyTipRegistry } from '../keytips';
 import { AvatarList } from '../../collab/AvatarList';
 import { CollaborateButton } from '../../collab/CollaborateButton';
 import { useCollabStore } from '../../collab/use-collab-store';
+import { RibbonVisibilityPathItem } from '../visibility/RibbonVisibilityContext';
 import { RibbonCollapseToggle } from './RibbonCollapseToggle';
 import { RibbonDisplayOptions } from './RibbonDisplayOptions';
 import {
@@ -66,6 +67,9 @@ export const TAB_KEYTIP_MAP: Record<string, string> = {
   view: 'W',
   'table-design': 'JT', // Multi-key sequence (J followed by T)
   'chart-design': 'JC', // Multi-key sequence (J followed by C)
+  'chart-format': 'JF', // Multi-key sequence (J followed by F)
+  'pivot-analyze': 'JY', // Multi-key sequence (J followed by Y)
+  'pivot-design': 'JV', // Multi-key sequence (J followed by V)
 };
 
 // =============================================================================
@@ -451,7 +455,9 @@ function TabBarImpl<T extends string>({
         className="hidden min-[720px]:flex flex-shrink-0 items-center gap-[var(--tabbar-button-group-gap)] ml-auto"
       >
         {collabEnabled && remoteParticipants.size > 0 && (
-          <AvatarList participants={remoteParticipants} />
+          <RibbonVisibilityPathItem path={['collaboration', 'tabBar', 'avatars']}>
+            <AvatarList participants={remoteParticipants} />
+          </RibbonVisibilityPathItem>
         )}
         <CollaborateButton />
 

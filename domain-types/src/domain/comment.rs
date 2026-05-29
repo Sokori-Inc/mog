@@ -26,6 +26,23 @@ pub struct CommentMention {
     pub length: u32,
 }
 
+/// Legacy VML note shape anchor.
+///
+/// Excel stores legacy note callout geometry in VML `<x:Anchor>` as
+/// `leftColumn,leftOffset,topRow,topOffset,rightColumn,rightOffset,bottomRow,bottomOffset`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteShapeAnchor {
+    pub left_column: u32,
+    pub left_offset: u32,
+    pub top_row: u32,
+    pub top_offset: u32,
+    pub right_column: u32,
+    pub right_offset: u32,
+    pub bottom_row: u32,
+    pub bottom_offset: u32,
+}
+
 /// Whether a comment is a legacy note or a modern threaded comment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +135,16 @@ pub struct Comment {
     /// Only meaningful when comment_type == CommentType::Note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_width: Option<f64>,
+    /// Full VML note shape anchor geometry.
+    /// Only meaningful when comment_type == CommentType::Note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_shape_anchor: Option<NoteShapeAnchor>,
+    /// Legacy SpreadsheetML `<commentPr>` display properties.
+    ///
+    /// This is note/comment package fidelity that is regenerated from typed
+    /// state on export rather than replayed as raw XML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_pr: Option<ooxml_types::comments::CommentPr>,
 }
 
 impl Default for Comment {
@@ -146,6 +173,8 @@ impl Default for Comment {
             visible: None,
             note_height: None,
             note_width: None,
+            note_shape_anchor: None,
+            comment_pr: None,
         }
     }
 }
@@ -177,8 +206,18 @@ pub struct RichTextRun {
     pub font_size: Option<f64>,
     pub bold: bool,
     pub italic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline_style: Option<ooxml_types::styles::UnderlineStyle>,
     pub underline: bool,
     pub strikethrough: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condense: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend: Option<bool>,
     /// Resolved RGB "#RRGGBB"
     pub color: Option<String>,
     /// Font color by indexed palette (e.g. 81 for default comment text color).

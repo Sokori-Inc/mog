@@ -12,7 +12,7 @@
  * - Using Button, Checkbox, Input primitives from ../ui/
  */
 
-import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FocusEvent } from 'react';
 
 import { DARK_STYLES, getTableStyleColors, LIGHT_STYLES, MEDIUM_STYLES } from '@mog/grid-renderer';
 import { useUIStore } from '../../../internal-api';
@@ -24,14 +24,19 @@ import {
   TABLE_TOOLS_COLLAPSE_CONFIG,
 } from '@mog-sdk/contracts/ribbon';
 import type { TableStylePreset } from '@mog-sdk/contracts/tables';
+import { useDispatch } from '../../../hooks/toolbar/use-action-dependencies';
 import { keyTipRegistry } from '../keytips';
 import { RibbonButton } from '../primitives/RibbonButton';
 import { RibbonDropdownItem, RibbonDropdownPanel } from '../primitives/RibbonDropdown';
 import { ToolbarGroup } from '../primitives/ToolbarGroup';
+import { RibbonVisibilityItem } from '../visibility/RibbonVisibilityContext';
 import {
   ConvertToRangeIcon,
   DeleteTableIcon,
   DropdownArrowIcon,
+  PivotTableIcon,
+  RemoveDuplicatesIcon,
+  SlicerIcon,
   TableIcon,
 } from '../primitives/ToolbarIcons';
 
@@ -71,6 +76,27 @@ interface TableDesignRibbonProps {
 // =============================================================================
 // Style Gallery Component
 // =============================================================================
+
+function isA1StyleCellReference(name: string): boolean {
+  const match = /^([A-Za-z]{1,3})([0-9]+)$/.exec(name);
+  if (!match) return false;
+
+  const row = Number(match[2]);
+  if (!Number.isInteger(row) || row < 1 || row > 1_048_576) return false;
+
+  let col = 0;
+  for (const char of match[1].toUpperCase()) {
+    col = col * 26 + (char.charCodeAt(0) - 64);
+  }
+
+  return col >= 1 && col <= 16_384;
+}
+
+function isValidTableNameSyntax(name: string): boolean {
+  if (name.trim().length === 0) return false;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
+  return !isA1StyleCellReference(name);
+}
 
 interface StyleSwatchProps {
   preset: TableStylePreset;
@@ -255,6 +281,8 @@ export function TableDesignRibbon({
   onConvertToRange,
 }: TableDesignRibbonProps) {
   const [localName, setLocalName] = useState(tableName ?? '');
+  const localNameRef = useRef(tableName ?? '');
+  const dispatch = useDispatch();
 
   // style gallery dropdown lifted into the ribbonDropdowns slice so
   // the keytip chord (Alt+J,T,S) can open it via OPEN_RIBBON_DROPDOWN.
@@ -272,20 +300,31 @@ export function TableDesignRibbon({
   );
 
   const handleNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    localNameRef.current = e.target.value;
     setLocalName(e.target.value);
   }, []);
 
-  const handleNameBlur = useCallback(() => {
-    if (localName && localName !== tableName) {
-      onRenameTable(localName);
-    }
-  }, [localName, tableName, onRenameTable]);
+  const handleNameBlur = useCallback(
+    (e: FocusEvent<HTMLInputElement>) => {
+      const nextName = localNameRef.current || e.currentTarget.value;
+      if (!isValidTableNameSyntax(nextName)) {
+        localNameRef.current = tableName ?? '';
+        setLocalName(tableName ?? '');
+        return;
+      }
+      if (nextName !== tableName) {
+        onRenameTable(nextName);
+      }
+    },
+    [tableName, onRenameTable],
+  );
 
   const handleNameKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key === 'Enter') {
         e.currentTarget.blur();
       } else if (e.key === 'Escape') {
+        localNameRef.current = tableName ?? '';
         setLocalName(tableName ?? '');
         e.currentTarget.blur();
       }
@@ -293,14 +332,13 @@ export function TableDesignRibbon({
     [tableName],
   );
 
-  // Update local name when table changes
-  if (
-    tableName !== null &&
-    localName !== tableName &&
-    document.activeElement?.tagName !== 'INPUT'
-  ) {
+  // Update local name when the selected table changes, without clobbering an
+  // in-progress edit on every controlled-input render.
+  useEffect(() => {
+    if (tableName === null || document.activeElement?.tagName === 'INPUT') return;
+    localNameRef.current = tableName;
     setLocalName(tableName);
-  }
+  }, [tableName]);
 
   // ===========================================================================
   // KeyTip Registration (display-only — keytip overlay reads `key`,
@@ -321,6 +359,22 @@ export function TableDesignRibbon({
 
     keyTipRegistry.register({ key: 'D', tabId: 'tableDesign', elementId: 'table-delete' });
     cleanups.push(() => keyTipRegistry.unregister('D', 'tableDesign'));
+
+    keyTipRegistry.register({ key: 'R', tabId: 'tableDesign', elementId: 'table-resize' });
+    cleanups.push(() => keyTipRegistry.unregister('R', 'tableDesign'));
+
+    keyTipRegistry.register({ key: 'P', tabId: 'tableDesign', elementId: 'table-summarize-pivot' });
+    cleanups.push(() => keyTipRegistry.unregister('P', 'tableDesign'));
+
+    keyTipRegistry.register({
+      key: 'M',
+      tabId: 'tableDesign',
+      elementId: 'table-remove-duplicates',
+    });
+    cleanups.push(() => keyTipRegistry.unregister('M', 'tableDesign'));
+
+    keyTipRegistry.register({ key: 'I', tabId: 'tableDesign', elementId: 'table-insert-slicer' });
+    cleanups.push(() => keyTipRegistry.unregister('I', 'tableDesign'));
 
     keyTipRegistry.register({ key: 'S', tabId: 'tableDesign', elementId: 'table-style-gallery' });
     cleanups.push(() => keyTipRegistry.unregister('S', 'tableDesign'));
@@ -345,6 +399,7 @@ export function TableDesignRibbon({
       {/* Properties Group */}
       <ToolbarGroup
         label="Properties"
+        visibilityKey="tableProperties"
         collapseConfig={TABLE_PROPERTIES_COLLAPSE_CONFIG}
         dropdownIcon={<TableIcon />}
       >
@@ -353,15 +408,18 @@ export function TableDesignRibbon({
             <TableIcon />
             <span className="text-ribbon text-ss-text-tertiary">Table Name:</span>
           </div>
-          <Input
-            type="text"
-            value={localName}
-            onChange={handleNameChange}
-            onBlur={handleNameBlur}
-            onKeyDown={handleNameKeyDown}
-            className="w-25 px-1 py-0.5 text-ribbon"
-            title="Table name (used in structured references)"
-          />
+          <RibbonVisibilityItem item="tableName">
+            <Input
+              type="text"
+              value={localName}
+              onChange={handleNameChange}
+              onBlur={handleNameBlur}
+              onKeyDown={handleNameKeyDown}
+              className="w-25 px-1 py-0.5 text-ribbon"
+              title="Table name (used in structured references)"
+              aria-label="Table Name"
+            />
+          </RibbonVisibilityItem>
         </div>
       </ToolbarGroup>
 
@@ -374,56 +432,70 @@ export function TableDesignRibbon({
         <div className="flex flex-col gap-[var(--ribbon-button-gap)]">
           {/* Row options */}
           <div className="flex gap-2">
-            <Checkbox
-              id="table-header-row"
-              checked={hasHeaderRow}
-              onChange={onToggleHeaderRow}
-              label="Header Row"
-              className="text-ribbon"
-            />
-            <Checkbox
-              id="table-total-row"
-              checked={hasTotalRow}
-              onChange={onToggleTotalRow}
-              label="Total Row"
-              className="text-ribbon"
-            />
-            <Checkbox
-              id="table-banded-rows"
-              checked={showBandedRows}
-              onChange={onToggleBandedRows}
-              label="Banded Rows"
-              className="text-ribbon"
-            />
+            <RibbonVisibilityItem item="headerRow">
+              <Checkbox
+                id="table-header-row"
+                checked={hasHeaderRow}
+                onChange={onToggleHeaderRow}
+                label="Header Row"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
+            <RibbonVisibilityItem item="totalRow">
+              <Checkbox
+                id="table-total-row"
+                checked={hasTotalRow}
+                onChange={onToggleTotalRow}
+                label="Total Row"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
+            <RibbonVisibilityItem item="bandedRows">
+              <Checkbox
+                id="table-banded-rows"
+                checked={showBandedRows}
+                onChange={onToggleBandedRows}
+                label="Banded Rows"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
           </div>
           {/* Column options */}
           <div className="flex gap-2">
-            <Checkbox
-              checked={showFirstColumnHighlight}
-              onChange={onToggleFirstColumnHighlight}
-              label="First Column"
-              className="text-ribbon"
-            />
-            <Checkbox
-              checked={showLastColumnHighlight}
-              onChange={onToggleLastColumnHighlight}
-              label="Last Column"
-              className="text-ribbon"
-            />
-            <Checkbox
-              checked={showBandedColumns}
-              onChange={onToggleBandedColumns}
-              label="Banded Columns"
-              className="text-ribbon"
-            />
+            <RibbonVisibilityItem item="firstColumn">
+              <Checkbox
+                checked={showFirstColumnHighlight}
+                onChange={onToggleFirstColumnHighlight}
+                label="First Column"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
+            <RibbonVisibilityItem item="lastColumn">
+              <Checkbox
+                checked={showLastColumnHighlight}
+                onChange={onToggleLastColumnHighlight}
+                label="Last Column"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
+            <RibbonVisibilityItem item="bandedColumns">
+              <Checkbox
+                checked={showBandedColumns}
+                onChange={onToggleBandedColumns}
+                label="Banded Columns"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
             {/* Filter Button Toggle */}
-            <Checkbox
-              id="table-filter-button"
-              checked={showFilterButtons}
-              onChange={onToggleFilterButtons}
-              label="Filter Button"
-              className="text-ribbon"
-            />
+            <RibbonVisibilityItem item="filterButton">
+              <Checkbox
+                id="table-filter-button"
+                checked={showFilterButtons}
+                onChange={onToggleFilterButtons}
+                label="Filter Button"
+                className="text-ribbon"
+              />
+            </RibbonVisibilityItem>
           </div>
         </div>
       </ToolbarGroup>
@@ -451,6 +523,58 @@ export function TableDesignRibbon({
       >
         <div className="flex items-center gap-[var(--ribbon-button-inline-gap)]">
           <RibbonButton
+            id="table-resize"
+            layout="vertical"
+            height="full"
+            icon={<TableIcon />}
+            label="Resize"
+            onClick={() => {
+              if (tableName) dispatch('OPEN_RESIZE_TABLE_DIALOG', { tableId: tableName });
+            }}
+            title="Resize Table"
+            aria-label="Resize Table"
+            disabled={!tableName}
+          />
+          <RibbonButton
+            id="table-summarize-pivot"
+            layout="vertical"
+            height="full"
+            icon={<PivotTableIcon />}
+            label="PivotTable"
+            onClick={() => {
+              if (tableName) dispatch('OPEN_PIVOT_DIALOG', { tableId: tableName });
+            }}
+            title="Summarize with PivotTable"
+            aria-label="Summarize with PivotTable"
+            disabled={!tableName}
+          />
+          <RibbonButton
+            id="table-remove-duplicates"
+            layout="vertical"
+            height="full"
+            icon={<RemoveDuplicatesIcon />}
+            label="Duplicates"
+            onClick={() => {
+              if (tableName) dispatch('OPEN_REMOVE_DUPLICATES_DIALOG', { tableId: tableName });
+            }}
+            title="Remove Duplicates"
+            aria-label="Remove Duplicates"
+            disabled={!tableName}
+          />
+          <RibbonButton
+            id="table-insert-slicer"
+            layout="vertical"
+            height="full"
+            icon={<SlicerIcon />}
+            label="Slicer"
+            onClick={() => {
+              if (tableName) dispatch('OPEN_INSERT_SLICER_DIALOG', { tableId: tableName });
+            }}
+            title="Insert Slicer"
+            aria-label="Insert Slicer"
+            disabled={!tableName}
+          />
+          <RibbonButton
             id="table-convert-to-range"
             layout="vertical"
             height="full"
@@ -469,6 +593,7 @@ export function TableDesignRibbon({
             onClick={onDeleteTable}
             title="Delete table (removes table and data)"
             aria-label="Delete Table"
+            visibilityKey="delete"
           />
         </div>
       </ToolbarGroup>

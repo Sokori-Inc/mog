@@ -41,6 +41,7 @@ import {
   useWorkbook,
 } from '../../infra/context';
 import { getUniqueSheetName } from '../../infra/utils/naming';
+import type { WorkbookWithImportedPivots } from '../../pivot/imported-pivot-runtime';
 
 // =============================================================================
 // Types for Location Selection
@@ -262,13 +263,24 @@ export function usePivotTables({ sheetId }: UsePivotTablesOptions): UsePivotTabl
     // Async initial load via unified API
     const loadConfigs = async () => {
       try {
-        const pivotInfos = await ws.pivots.list();
+        await ws.pivots.list();
         if (cancelled) return;
         // list() returns PivotTableInfo[], but we need full configs.
         // Use getAllPivots via the bridge for the full configs.
         const allConfigs = await pivotBridge.getAllPivots(sheetId);
+        const importedPivotRuntime = (wb as WorkbookWithImportedPivots).importedPivots;
+        const importedConfigs = importedPivotRuntime
+          ? await Promise.all(
+              (await importedPivotRuntime.getRenderedImportedPivots(sheetId)).map((pivot) =>
+                importedPivotRuntime.getRenderedImportedPivotConfig(sheetId, pivot.id),
+              ),
+            )
+          : [];
         if (cancelled) return;
-        setConfigs(allConfigs);
+        setConfigs([
+          ...allConfigs,
+          ...importedConfigs.filter((config): config is PivotTableConfig => config != null),
+        ]);
       } catch {
         if (!cancelled) setConfigs([]);
       }
@@ -303,7 +315,7 @@ export function usePivotTables({ sheetId }: UsePivotTablesOptions): UsePivotTabl
       unsubUpdated();
       unsubDeleted();
     };
-  }, [sheetId, ws, pivotBridge, eventBus]);
+  }, [sheetId, ws, pivotBridge, eventBus, wb]);
 
   // Compute results when configs change
   useEffect(() => {
@@ -315,6 +327,15 @@ export function usePivotTables({ sheetId }: UsePivotTablesOptions): UsePivotTabl
       const newResults = new Map<string, { result: PivotTableResult | null; error?: string }>();
 
       for (const config of configs) {
+        if (config.id.startsWith('imported:')) {
+          const imported = await (
+            wb as WorkbookWithImportedPivots
+          ).importedPivots?.getRenderedImportedPivotWithResult(sheetId, config.id);
+          if (cancelled) return;
+          newResults.set(config.id, { result: imported?.result ?? null });
+          continue;
+        }
+
         // Subscribe to result updates for each pivot (ephemeral computation cache)
         const unsubscribe = pivotBridge.subscribe(config.id, (pivotId, result, error) => {
           setResults((prev) => {
@@ -343,7 +364,7 @@ export function usePivotTables({ sheetId }: UsePivotTablesOptions): UsePivotTabl
       cancelled = true;
       unsubscribes.forEach((unsub) => unsub());
     };
-  }, [configs, ws, pivotBridge]);
+  }, [configs, ws, pivotBridge, wb, sheetId]);
 
   // Combine configs with results
   const pivotTables = useMemo<PivotTableWithResult[]>(() => {
@@ -407,10 +428,12 @@ export function usePivotTables({ sheetId }: UsePivotTablesOptions): UsePivotTabl
           outputSheetName: sheetName,
           outputLocation: { row: 0, col: 0 },
         });
+        const outputSheetId = toSheetId(result.sheetId);
+        await wb.getSheetById(outputSheetId).pivots.refresh(result.config.name);
 
         return {
           config: result.config,
-          outputSheetId: toSheetId(result.sheetId),
+          outputSheetId,
         };
       } else {
         // =====================================================================
@@ -435,6 +458,7 @@ export function usePivotTables({ sheetId }: UsePivotTablesOptions): UsePivotTabl
           outputSheetName: targetSheetName,
           outputLocation: targetCell,
         });
+        await targetWs.pivots.refresh(config.name);
 
         return {
           config,

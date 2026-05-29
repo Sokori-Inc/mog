@@ -84,25 +84,39 @@ pub const KEY_VALIDATION_RULES: &str = "validationRules";
 
 /// Workbook-level domain maps
 pub const KEY_STYLE_PALETTE: &str = "stylePalette";
+pub const KEY_WORKBOOK_STYLESHEET: &str = "workbookStylesheet";
+pub const KEY_DXF_REGISTRY: &str = "differentialFormatRegistry";
+pub const KEY_SHARED_STRING_HINTS: &str = "sharedStringHints";
+pub const KEY_PACKAGE_FIDELITY_METADATA: &str = "packageFidelityMetadata";
 pub const KEY_WORKBOOK_SETTINGS: &str = "workbookSettings";
 pub const KEY_WORKBOOK_IDENTITY: &str = "workbookIdentity";
 pub const KEY_WORKBOOK_LINKS: &str = "workbookLinks";
+pub const KEY_WORKBOOK_CONNECTIONS: &str = "workbookConnections";
 pub const KEY_IMPORTED_EXTERNAL_CACHE: &str = "importedExternalCache";
 pub const KEY_IMPORTED_EXTERNAL_USAGE_PROVENANCE: &str = "importedExternalUsageProvenance";
 pub const KEY_IMPORTED_EXTERNAL_PACKAGE_ARTIFACTS: &str = "importedExternalPackageArtifacts";
 pub const KEY_NAMED_RANGES: &str = "namedRanges";
 pub const KEY_TABLES: &str = "tables";
+pub const KEY_CUSTOM_TABLE_STYLES: &str = "customTableStyles";
+pub const KEY_XLSX_TABLE_STYLES: &str = "xlsxTableStyles";
 pub const KEY_DATA_TABLE_REGIONS: &str = "dataTableRegions";
 pub const KEY_SLICERS: &str = "slicers";
+pub const KEY_TIMELINES: &str = "timelines";
 pub const KEY_PIVOT_SPECS: &str = "pivotSpecs";
 pub const KEY_PIVOT_CACHE_SOURCES: &str = "pivotCacheSources";
+pub const KEY_PIVOT_CACHE_RECORDS: &str = "pivotCacheRecords";
 pub const KEY_POWER_QUERY: &str = "powerQuery";
 pub const KEY_SCENARIOS: &str = "scenarios";
 pub const KEY_THEME: &str = "theme";
 pub const KEY_CUSTOM_CELL_STYLES: &str = "custom_cell_styles";
 pub const KEY_DOCUMENT_PROPERTIES: &str = "documentProperties";
+pub const KEY_EXTENDED_DOCUMENT_PROPERTIES: &str = "extendedDocumentProperties";
+pub const KEY_XLSX_METADATA: &str = "xlsxMetadata";
 pub const KEY_FILE_VERSION: &str = "fileVersion";
 pub const KEY_FILE_SHARING: &str = "fileSharing";
+pub const KEY_WEB_PUBLISHING: &str = "webPublishing";
+pub const KEY_THREADED_COMMENT_PERSONS: &str = "threadedCommentPersons";
+pub const KEY_THREADED_COMMENT_PERSONS_PART_PRESENT: &str = "threadedCommentPersonsPartPresent";
 
 /// Meta map keys
 pub const KEY_NAME: &str = "name";
@@ -121,6 +135,13 @@ pub const KEY_FORMULA_VOLATILE: &str = "fv";
 /// `#[serde(default)]` default on [`formula_types::IdentityFormula`], so
 /// pre-W7 Yrs documents that never wrote this key deserialize correctly.
 pub const KEY_FORMULA_AGGREGATE: &str = "fa";
+/// Original OOXML formula metadata for import/export fidelity.
+///
+/// Stored as a JSON-serialized `ooxml_types::worksheet::CellFormula` on formula
+/// cells. The plain formula body remains in [`KEY_FORMULA`]; this field only
+/// carries OOXML attributes such as `t="array"`, `ref`, `si`, and data-table
+/// flags.
+pub const KEY_FORMULA_METADATA: &str = "fm";
 
 /// CSE array-formula: CSE (`Ctrl+Shift+Enter`) array-formula range, written on
 /// the anchor cell only. Stored as A1 range string (e.g. `"A1:C5"`) so it
@@ -269,14 +290,19 @@ pub fn init_canonical_schema(doc: &Doc) -> (MapRef, MapRef, crate::hex::SmallHex
     workbook.insert(&mut txn, KEY_IMPORTED_EXTERNAL_CACHE, empty());
     workbook.insert(&mut txn, KEY_IMPORTED_EXTERNAL_USAGE_PROVENANCE, empty());
     workbook.insert(&mut txn, KEY_IMPORTED_EXTERNAL_PACKAGE_ARTIFACTS, empty());
+    workbook.insert(&mut txn, KEY_PACKAGE_FIDELITY_METADATA, empty());
     workbook.insert(&mut txn, KEY_NAMED_RANGES, empty());
     workbook.insert(&mut txn, KEY_TABLES, empty());
     workbook.insert(&mut txn, KEY_SLICERS, empty());
+    workbook.insert(&mut txn, KEY_TIMELINES, empty());
     workbook.insert(&mut txn, KEY_POWER_QUERY, empty());
     workbook.insert(&mut txn, KEY_SCENARIOS, empty());
     workbook.insert(&mut txn, KEY_PIVOT_SPECS, empty());
     workbook.insert(&mut txn, KEY_PIVOT_CACHE_SOURCES, empty());
+    workbook.insert(&mut txn, KEY_PIVOT_CACHE_RECORDS, empty());
     workbook.insert(&mut txn, KEY_THEME, empty());
+    workbook.insert(&mut txn, KEY_EXTENDED_DOCUMENT_PROPERTIES, empty());
+    workbook.insert(&mut txn, KEY_XLSX_METADATA, empty());
     workbook.insert(&mut txn, KEY_CUSTOM_CELL_STYLES, empty());
     workbook.insert(&mut txn, KEY_RANGE_BINDINGS, empty());
 
@@ -465,11 +491,17 @@ mod tests {
             KEY_IMPORTED_EXTERNAL_CACHE,
             KEY_IMPORTED_EXTERNAL_USAGE_PROVENANCE,
             KEY_IMPORTED_EXTERNAL_PACKAGE_ARTIFACTS,
+            KEY_PACKAGE_FIDELITY_METADATA,
+            KEY_EXTENDED_DOCUMENT_PROPERTIES,
+            KEY_XLSX_METADATA,
             KEY_NAMED_RANGES,
             KEY_TABLES,
             KEY_SLICERS,
+            KEY_TIMELINES,
             KEY_POWER_QUERY,
             KEY_SCENARIOS,
+            KEY_PIVOT_CACHE_SOURCES,
+            KEY_PIVOT_CACHE_RECORDS,
             KEY_RANGE_BINDINGS,
         ] {
             assert!(

@@ -24,11 +24,15 @@ import { useCallback, useEffect, useMemo, type RefObject } from 'react';
 
 import {
   buildClipboardData,
+  buildSparseClipboardData,
+  getClipboardCellDisplayValue,
+  hasFullShapeIntent,
   unifiedCopy,
   unifiedCut,
   unifiedPaste,
   writeToSystemClipboard,
   type ClipboardStoreReader,
+  type SparseClipboardCellEntry,
   type UnifiedCopyCutDeps,
 } from '../../domain/clipboard';
 import {
@@ -37,20 +41,25 @@ import {
 } from '../../domain/clipboard/paste-defaults';
 import { readPasteDefaultsPreference } from '../../infra/state/paste-defaults-store';
 
-import type {
-  ClipboardData,
-  ExternalPastePayload,
-  PasteSpecialOptions,
+import {
+  EXTERNAL_SOURCE_SHEET_ID,
+  type ClipboardData,
+  type ExternalPastePayload,
+  type PasteSpecialOptions,
 } from '@mog-sdk/contracts/actors';
+import type { Comment } from '@mog-sdk/contracts/api';
 import { clipboardSelectors } from '../../selectors';
 import type { ClipboardState } from '@mog-sdk/contracts/actors';
-import type { CellRange, SheetId } from '@mog-sdk/contracts/core';
+import { cellId } from '@mog-sdk/contracts/cell-identity';
+import type { CellRange, CellRawValue, CellValue, SheetId } from '@mog-sdk/contracts/core';
 import type { ClipboardSnapshot } from '@mog-sdk/contracts/machines';
 import type { CellCoord } from '@mog-sdk/contracts/rendering';
+import { ensureFormulaA1 } from '@mog/spreadsheet-utils/cells/formula-string';
 import { blobToDataUrl } from '../../utils/blob-to-data-url';
 import { withHandlerErrors } from '../../devtools/handler-error-boundary';
 import { useActiveSheetId, useReadOnly, useWorkbook } from '../../infra/context';
 import { rangeToHTML, rangeToTSV } from '../../infra/utils/clipboard-utils';
+import { waitForPendingClipboardPaste } from '../../systems/grid-editing/coordination/pending-clipboard-paste';
 import { useCoordinator } from '../shared/use-coordinator';
 
 // =============================================================================
@@ -75,6 +84,34 @@ interface ClipboardStateSlice {
   marchingAntsPhase: number;
   errorMessage: string | null;
   pastePreviewTarget: CellCoord | null;
+}
+
+function normalizeClipboardSignature(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n$/, '');
+}
+
+function isOurClipboardData(
+  clipboardState: ClipboardState,
+  clipboardData: ClipboardData | null,
+  systemText: string,
+): boolean {
+  const internalSignature = clipboardData?.textSignature
+    ? normalizeClipboardSignature(clipboardData.textSignature)
+    : '';
+  const systemSignature = normalizeClipboardSignature(systemText);
+  const hasFreshInternalClipboard =
+    Boolean(clipboardData?.textSignature) &&
+    clipboardData?.sourceSheetId !== EXTERNAL_SOURCE_SHEET_ID &&
+    clipboardState.context.isStale !== true;
+
+  return (
+    (internalSignature === systemSignature && systemSignature !== '') || hasFreshInternalClipboard
+  );
+}
+
+async function sendClipboardPasteCommand(command: () => void): Promise<void> {
+  command();
+  await waitForPendingClipboardPaste();
 }
 
 // =============================================================================
@@ -123,6 +160,11 @@ function clipboardStateEqual(a: ClipboardStateSlice, b: ClipboardStateSlice): bo
     rangesEqual(a.copySource, b.copySource) &&
     coordEqual(a.pastePreviewTarget, b.pastePreviewTarget)
   );
+}
+
+function toCellRawValue(value: CellValue | null | undefined): CellRawValue {
+  if (value == null) return null;
+  return typeof value === 'object' ? null : value;
 }
 
 // =============================================================================
@@ -258,6 +300,10 @@ async function prefetchClipboardData(
 ) {
   const ws = wb.getSheetById(activeSheetId);
 
+  if (hasFullShapeIntent(ranges)) {
+    return prefetchSparseClipboardData(wb, activeSheetId, ranges);
+  }
+
   // Compute bounding box across all ranges
   let minRow = Infinity,
     maxRow = -Infinity,
@@ -282,6 +328,7 @@ async function prefetchClipboardData(
     formatEntries,
     rangeSchemas,
     conditionalFormats,
+    commentEntries,
   ] = await Promise.all([
     ws.getRange(minRow, minCol, maxRow, maxCol),
     ws.structure.getMergedRegions(),
@@ -309,6 +356,16 @@ async function prefetchClipboardData(
     // carry validation rules along with copied cells.
     ws._internal.getRangeSchemas().catch(() => []),
     ws.conditionalFormats.list().catch(() => []),
+    Promise.all(
+      Array.from({ length: numRows * numCols }, (_, idx) => {
+        const r = minRow + Math.floor(idx / numCols);
+        const c = minCol + (idx % numCols);
+        return ws.comments
+          .getForCell(r, c)
+          .then((comments) => [`${r},${c}`, comments] as [string, Comment[]])
+          .catch(() => [`${r},${c}`, []] as [string, Comment[]]);
+      }),
+    ),
   ]);
 
   // Build sync lookup maps
@@ -326,6 +383,7 @@ async function prefetchClipboardData(
   const formatLookup = new Map<string, any>(formatEntries);
   const hiddenRowSet = new Set(hiddenRowEntries.filter(([, h]) => h).map(([r]) => r));
   const hiddenColSet = new Set(hiddenColEntries.filter(([, h]) => h).map(([c]) => c));
+  const commentsByPosition = new Map<string, Comment[]>(commentEntries);
 
   // Build merge origin lookup for export options
   const mergeLookup = new Map<
@@ -358,6 +416,7 @@ async function prefetchClipboardData(
     isColHidden: (_sid, col) => hiddenColSet.has(col),
     getRangeSchemas: (_sid) => rangeSchemas,
     getConditionalFormats: (_sid) => conditionalFormats,
+    getCommentsForCellAt: (_sid, row, col) => commentsByPosition.get(`${row},${col}`) ?? [],
   };
 
   const exportOptions = {
@@ -372,7 +431,176 @@ async function prefetchClipboardData(
   const getFormat = (_sid: string, _row: number, _col: number) =>
     formatLookup.get(`${_row},${_col}`) ?? undefined;
 
-  return { storeReader, exportOptions, getDisplayValue, getFormat };
+  const buildData = (clipRanges: CellRange[]) =>
+    buildClipboardData(clipRanges, activeSheetId, storeReader);
+  const generateTSV = (clipRanges: CellRange[]) => {
+    const range = clipRanges[0] ?? ranges[0];
+    return range ? rangeToTSV(activeSheetId, range, getDisplayValue, exportOptions) : '';
+  };
+  const generateHTML = (clipRanges: CellRange[]) => {
+    const range = clipRanges[0] ?? ranges[0];
+    return range
+      ? rangeToHTML(activeSheetId, range, getDisplayValue, getFormat, undefined, exportOptions)
+      : '';
+  };
+
+  return {
+    storeReader,
+    exportOptions,
+    getDisplayValue,
+    getFormat,
+    buildData,
+    generateTSV,
+    generateHTML,
+  };
+}
+
+async function prefetchSparseClipboardData(
+  wb: ReturnType<typeof useWorkbook>,
+  activeSheetId: SheetId,
+  ranges: readonly CellRange[],
+) {
+  const ws = wb.getSheetById(activeSheetId);
+  const mutableRanges = [...ranges] as CellRange[];
+  const allComments = await ws.comments.list().catch((): Comment[] => []);
+  const commentPositions = await ws._internal
+    .batchGetCellPositions(allComments.map((comment) => comment.cellRef))
+    .catch(() => new Map<string, { row: number; col: number }>());
+  const commentsByPosition = new Map<string, Comment[]>();
+  for (const comment of allComments) {
+    const position = commentPositions.get(comment.cellRef);
+    if (!position || !isCellInAnyRange(position.row, position.col, mutableRanges)) continue;
+    const key = `${position.row},${position.col}`;
+    const existing = commentsByPosition.get(key);
+    if (existing) {
+      existing.push(comment);
+    } else {
+      commentsByPosition.set(key, [comment]);
+    }
+  }
+
+  const identifiedCells = (
+    await Promise.all(
+      mutableRanges.map((range) =>
+        ws.getRangeWithIdentity(range.startRow, range.startCol, range.endRow, range.endCol),
+      ),
+    )
+  ).flat();
+
+  const entriesByPosition = new Map<string, SparseClipboardCellEntry>();
+  for (const cell of identifiedCells) {
+    entriesByPosition.set(`${cell.row},${cell.col}`, {
+      row: cell.row,
+      col: cell.col,
+      cellData: {
+        id: cellId(cell.cellId),
+        row: cell.row,
+        col: cell.col,
+        raw: toCellRawValue(cell.value),
+        computed: cell.value ?? undefined,
+        formula: cell.formulaText ? ensureFormulaA1(cell.formulaText) : undefined,
+      },
+    });
+  }
+  for (const position of commentPositions.values()) {
+    if (!isCellInAnyRange(position.row, position.col, mutableRanges)) continue;
+    const key = `${position.row},${position.col}`;
+    if (!entriesByPosition.has(key)) {
+      entriesByPosition.set(key, {
+        row: position.row,
+        col: position.col,
+      });
+    }
+  }
+
+  const sparseEntries = Array.from(entriesByPosition.values());
+  const formatEntries = await Promise.all(
+    sparseEntries.map((entry) =>
+      ws.formats
+        .get(entry.row, entry.col)
+        .then((format) => [`${entry.row},${entry.col}`, format] as [string, unknown])
+        .catch(() => [`${entry.row},${entry.col}`, undefined] as [string, unknown]),
+    ),
+  );
+  const formatLookup = new Map<string, unknown>(formatEntries);
+  for (const entry of sparseEntries) {
+    entry.format = formatLookup.get(
+      `${entry.row},${entry.col}`,
+    ) as SparseClipboardCellEntry['format'];
+  }
+
+  const [allMerges, rangeSchemas, conditionalFormats] = await Promise.all([
+    ws.structure.getMergedRegions(),
+    ws._internal.getRangeSchemas().catch(() => []),
+    ws.conditionalFormats.list().catch(() => []),
+  ]);
+
+  const storeReader: ClipboardStoreReader = {
+    getCellData: (_sid, row, col) => entriesByPosition.get(`${row},${col}`)?.cellData ?? undefined,
+    getCellFormat: (_sid, row, col) =>
+      (formatLookup.get(`${row},${col}`) as SparseClipboardCellEntry['format']) ?? undefined,
+    getMergedRegions: (_sid) =>
+      allMerges.map((m) => ({
+        startRow: m.startRow,
+        startCol: m.startCol,
+        endRow: m.endRow,
+        endCol: m.endCol,
+        rowSpan: m.endRow - m.startRow + 1,
+        colSpan: m.endCol - m.startCol + 1,
+      })),
+    getRangeSchemas: (_sid) => rangeSchemas,
+    getConditionalFormats: (_sid) => conditionalFormats,
+    getCommentsForCellAt: (_sid, row, col) => commentsByPosition.get(`${row},${col}`) ?? [],
+  };
+
+  const buildData = (clipRanges: CellRange[]) =>
+    buildSparseClipboardData(clipRanges, activeSheetId, sparseEntries, storeReader);
+  const generateTSV = (clipRanges: CellRange[]) => sparseClipboardDataToTSV(buildData(clipRanges));
+  const generateHTML = (clipRanges: CellRange[]) =>
+    sparseClipboardDataToHTML(buildData(clipRanges));
+
+  return {
+    storeReader,
+    exportOptions: {},
+    getDisplayValue: () => '',
+    getFormat: () => undefined,
+    buildData,
+    generateTSV,
+    generateHTML,
+  };
+}
+
+function isCellInAnyRange(row: number, col: number, ranges: CellRange[]): boolean {
+  return ranges.some(
+    (range) =>
+      row >= range.startRow && row <= range.endRow && col >= range.startCol && col <= range.endCol,
+  );
+}
+
+function sparseClipboardDataToTSV(data: ClipboardData): string {
+  const entries = Object.entries(data.cells).sort((a, b) => {
+    const [aRow, aCol] = a[0].split(',').map(Number);
+    const [bRow, bCol] = b[0].split(',').map(Number);
+    return aRow - bRow || aCol - bCol;
+  });
+  if (entries.length === 0) return ' ';
+
+  return entries.map(([, cell]) => getClipboardCellDisplayValue(cell)).join('\n');
+}
+
+function sparseClipboardDataToHTML(data: ClipboardData): string {
+  const tsv = sparseClipboardDataToTSV(data);
+  const rows = tsv.split('\n').map((value) => `<tr><td>${escapeHTML(value)}</td></tr>`);
+  return `<table>${rows.join('')}</table>`;
+}
+
+function escapeHTML(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // =============================================================================
@@ -529,30 +757,14 @@ export function useClipboard(): UseClipboardReturn {
       if (!ranges || ranges.length === 0) return;
 
       const mutableRanges = [...ranges] as CellRange[];
-      const firstRange = ranges[0];
-
       // Pre-fetch all data via ONE API — proper async, zero casts
       const prefetched = await prefetchClipboardData(wb, activeSheetId, ranges);
 
       const deps: UnifiedCopyCutDeps = {
         commands,
-        buildData: (r: CellRange[]) => buildClipboardData(r, activeSheetId, prefetched.storeReader),
-        generateTSV: () =>
-          rangeToTSV(
-            activeSheetId,
-            firstRange,
-            prefetched.getDisplayValue,
-            prefetched.exportOptions,
-          ),
-        generateHTML: () =>
-          rangeToHTML(
-            activeSheetId,
-            firstRange,
-            prefetched.getDisplayValue,
-            prefetched.getFormat,
-            undefined,
-            prefetched.exportOptions,
-          ),
+        buildData: prefetched.buildData,
+        generateTSV: prefetched.generateTSV,
+        generateHTML: prefetched.generateHTML,
       };
 
       await unifiedCopy(mutableRanges, deps);
@@ -570,30 +782,14 @@ export function useClipboard(): UseClipboardReturn {
       if (!ranges || ranges.length === 0) return;
 
       const mutableRanges = [...ranges] as CellRange[];
-      const firstRange = ranges[0];
-
       // Pre-fetch all data via ONE API — proper async, zero casts
       const prefetched = await prefetchClipboardData(wb, activeSheetId, ranges);
 
       const deps: UnifiedCopyCutDeps = {
         commands,
-        buildData: (r: CellRange[]) => buildClipboardData(r, activeSheetId, prefetched.storeReader),
-        generateTSV: () =>
-          rangeToTSV(
-            activeSheetId,
-            firstRange,
-            prefetched.getDisplayValue,
-            prefetched.exportOptions,
-          ),
-        generateHTML: () =>
-          rangeToHTML(
-            activeSheetId,
-            firstRange,
-            prefetched.getDisplayValue,
-            prefetched.getFormat,
-            undefined,
-            prefetched.exportOptions,
-          ),
+        buildData: prefetched.buildData,
+        generateTSV: prefetched.generateTSV,
+        generateHTML: prefetched.generateHTML,
       };
 
       await unifiedCut(mutableRanges, deps);
@@ -612,6 +808,7 @@ export function useClipboard(): UseClipboardReturn {
       await unifiedPaste(activeCell, {
         getClipboardSnapshot: () => actor.getSnapshot() as ClipboardState,
         commands,
+        waitForPasteCommit: waitForPendingClipboardPaste,
         pasteImage: async (blob, anchorCell) => {
           const ws = wb.getSheetById(activeSheetId);
           const dataUrl = await blobToDataUrl(blob);
@@ -633,6 +830,7 @@ export function useClipboard(): UseClipboardReturn {
         {
           getClipboardSnapshot: () => actor.getSnapshot() as ClipboardState,
           commands,
+          waitForPasteCommit: waitForPendingClipboardPaste,
         },
         { values: true },
       );
@@ -648,6 +846,7 @@ export function useClipboard(): UseClipboardReturn {
         {
           getClipboardSnapshot: () => actor.getSnapshot() as ClipboardState,
           commands,
+          waitForPasteCommit: waitForPendingClipboardPaste,
         },
         { formulas: true },
       );
@@ -663,6 +862,7 @@ export function useClipboard(): UseClipboardReturn {
         {
           getClipboardSnapshot: () => actor.getSnapshot() as ClipboardState,
           commands,
+          waitForPasteCommit: waitForPendingClipboardPaste,
         },
         { formats: true },
       );
@@ -838,29 +1038,15 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
         if (!ranges || ranges.length === 0) return;
 
         const mutableRanges = [...ranges] as CellRange[];
-        const firstRange = ranges[0];
-
         // Pre-fetch all data via ONE API — proper async, zero casts
         const prefetched = await prefetchClipboardData(wb, activeSheetId, ranges);
 
         // Build clipboard data from pre-fetched lookups (sync)
-        const data = buildClipboardData(mutableRanges, activeSheetId, prefetched.storeReader);
+        const data = prefetched.buildData(mutableRanges);
 
         // Generate clipboard formats from pre-fetched lookups (sync)
-        const tsv = rangeToTSV(
-          activeSheetId,
-          firstRange,
-          prefetched.getDisplayValue,
-          prefetched.exportOptions,
-        );
-        const html = rangeToHTML(
-          activeSheetId,
-          firstRange,
-          prefetched.getDisplayValue,
-          prefetched.getFormat,
-          undefined,
-          prefetched.exportOptions,
-        );
+        const tsv = prefetched.generateTSV(mutableRanges);
+        const html = prefetched.generateHTML(mutableRanges);
 
         // Store text signature for external clipboard detection
         data.textSignature = tsv;
@@ -925,29 +1111,15 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
         if (!ranges || ranges.length === 0) return;
 
         const mutableRanges = [...ranges] as CellRange[];
-        const firstRange = ranges[0];
-
         // Pre-fetch all data via ONE API — proper async, zero casts
         const prefetched = await prefetchClipboardData(wb, activeSheetId, ranges);
 
         // Build clipboard data from pre-fetched lookups (sync)
-        const data = buildClipboardData(mutableRanges, activeSheetId, prefetched.storeReader);
+        const data = prefetched.buildData(mutableRanges);
 
         // Generate clipboard formats from pre-fetched lookups (sync)
-        const tsv = rangeToTSV(
-          activeSheetId,
-          firstRange,
-          prefetched.getDisplayValue,
-          prefetched.exportOptions,
-        );
-        const html = rangeToHTML(
-          activeSheetId,
-          firstRange,
-          prefetched.getDisplayValue,
-          prefetched.getFormat,
-          undefined,
-          prefetched.exportOptions,
-        );
+        const tsv = prefetched.generateTSV(mutableRanges);
+        const html = prefetched.generateHTML(mutableRanges);
 
         // Store text signature for external clipboard detection
         data.textSignature = tsv;
@@ -1005,7 +1177,7 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
         // Compare system clipboard with our text signature to detect external copies
         // - If they match: user is pasting our copy → use rich internal data (formulas, formats)
         // - If they differ: user copied from another app → parse external clipboard
-        const isOurClipboard = clipboardData?.textSignature === systemText && systemText !== '';
+        const isOurClipboard = isOurClipboardData(clipboardState, clipboardData, systemText);
 
         if (clipboardData && isOurClipboard) {
           // System clipboard matches what we wrote - use rich internal data
@@ -1014,9 +1186,11 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
             hasInternalRichData: true,
           });
           if (resolved.appliesDefault) {
-            commands.pasteSpecial(activeCell, resolved.options);
+            await sendClipboardPasteCommand(() =>
+              commands.pasteSpecial(activeCell, resolved.options),
+            );
           } else {
-            commands.paste(activeCell);
+            await sendClipboardPasteCommand(() => commands.paste(activeCell));
           }
           // Count cells from internal clipboard
           if (clipboardData.sourceRanges && clipboardData.sourceRanges.length > 0) {
@@ -1051,12 +1225,14 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
           });
           const resolvedOptions = resolved.appliesDefault ? resolved.options : undefined;
           if (shouldNoopExternalFormatsPaste(resolvedOptions, html || undefined)) return;
-          commands.externalPaste({
-            text,
-            targetCell: activeCell,
-            html: html || undefined,
-            options: resolvedOptions,
-          });
+          await sendClipboardPasteCommand(() =>
+            commands.externalPaste({
+              text,
+              targetCell: activeCell,
+              html: html || undefined,
+              options: resolvedOptions,
+            }),
+          );
           onPaste?.(1);
           return;
         }
@@ -1113,7 +1289,7 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
     const clipboardData = clipboardSelectors.data(clipboardState);
 
     // Compare system clipboard with our text signature to detect external copies
-    const isOurClipboard = clipboardData?.textSignature === systemText && systemText !== '';
+    const isOurClipboard = isOurClipboardData(clipboardState, clipboardData, systemText);
 
     if (clipboardData && isOurClipboard) {
       // System clipboard matches what we wrote - use rich internal data
@@ -1122,9 +1298,9 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
         hasInternalRichData: true,
       });
       if (resolved.appliesDefault) {
-        commands.pasteSpecial(activeCell, resolved.options);
+        await sendClipboardPasteCommand(() => commands.pasteSpecial(activeCell, resolved.options));
       } else {
-        commands.paste(activeCell);
+        await sendClipboardPasteCommand(() => commands.paste(activeCell));
       }
       if (clipboardData.sourceRanges && clipboardData.sourceRanges.length > 0) {
         const range = clipboardData.sourceRanges[0];
@@ -1143,7 +1319,9 @@ export function useClipboardEvents(options: UseClipboardEventsOptions): UseClipb
       });
       const resolvedOptions = resolved.appliesDefault ? resolved.options : undefined;
       if (shouldNoopExternalFormatsPaste(resolvedOptions)) return 0;
-      commands.externalPaste({ text, targetCell: activeCell, options: resolvedOptions });
+      await sendClipboardPasteCommand(() =>
+        commands.externalPaste({ text, targetCell: activeCell, options: resolvedOptions }),
+      );
       return 1;
     }
 

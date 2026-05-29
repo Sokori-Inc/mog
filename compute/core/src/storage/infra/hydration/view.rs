@@ -73,6 +73,13 @@ pub(super) fn hydrate_view_options(
     if let Some(scale) = view.zoom_scale {
         meta_map.insert(txn, "zoomScale", Any::Number(scale as f64));
     }
+    if view.workbook_view_id != 0 {
+        meta_map.insert(
+            txn,
+            "workbookViewId",
+            Any::Number(view.workbook_view_id as f64),
+        );
+    }
     if view.scroll_row > 0 {
         meta_map.insert(txn, "scrollTopRow", Any::Number(view.scroll_row as f64));
     }
@@ -97,6 +104,16 @@ pub(super) fn hydrate_view_options(
     }
     if let Some(ref sq) = view.sqref {
         meta_map.insert(txn, "sqref", Any::String(Arc::from(sq.as_str())));
+    }
+    if let Some(ref pane) = view.pane {
+        let json = serde_json::to_string(pane).unwrap_or_default();
+        if !json.is_empty() {
+            meta_map.insert(
+                txn,
+                "sheetPaneConfig",
+                Any::String(Arc::from(json.as_str())),
+            );
+        }
     }
     if view.has_explicit_top_left_cell {
         meta_map.insert(txn, "hasExplicitTopLeftCell", Any::Bool(true));
@@ -125,6 +142,13 @@ pub(super) fn hydrate_view_options(
     }
     // Store multi-pane selections as JSON for round-trip fidelity
     yrs_schema::helpers::write_json_vec(meta_map, txn, "selections", &view.selections);
+    if let Some(xml) = view
+        .ext_lst_xml
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        meta_map.insert(txn, "sheetViewExtLstXml", Any::String(Arc::from(xml)));
+    }
 }
 
 /// Hydrate sheet protection using structured Y.Map entries via

@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use ooxml_types::cond_format::IconSetType;
+use serde::{Deserialize, Deserializer, Serialize};
+
+use super::filter::{SortConditionBy, SortMethod};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +22,9 @@ pub struct TableSpec {
     /// Auto-filter xr:uid for revision tracking
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter_xr_uid: Option<String>,
+    /// Raw direct-child `<extLst>` owned by the table autoFilter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter_ext_lst_raw: Option<String>,
     pub columns: Vec<TableColumnSpec>,
     // DXF formatting IDs (differential formatting for table regions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,6 +55,9 @@ pub struct TableSpec {
     /// Connection ID for external data sources (query tables).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<u32>,
+    /// Table comment attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     /// Whether to insert a blank row below table.
     #[serde(default)]
     pub insert_row: bool,
@@ -67,6 +76,21 @@ pub struct TableSpec {
     /// Auto-filter column definitions (filter criteria applied to columns).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filter_columns: Vec<FilterColumnSpec>,
+    /// Query table owned by this table part, when the table is backed by an
+    /// external workbook connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_table: Option<super::connections::QueryTable>,
+    /// Imported worksheet relationship id for this table, when the table still
+    /// maps to the same live table relationship on export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worksheet_relationship_id_hint: Option<String>,
+    /// Imported package path for the table part, retained as typed provenance
+    /// for graph-owned export decisions and diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_part_path_hint: Option<String>,
+    /// Imported worksheet relationship target spelling for this table part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worksheet_relationship_target_hint: Option<String>,
 }
 
 /// Sort state for a table (for round-trip fidelity).
@@ -75,11 +99,20 @@ pub struct TableSpec {
 pub struct TableSortState {
     /// Reference range for the sort
     pub ref_range: String,
+    /// Whether the sort operates column-wise rather than row-wise.
+    #[serde(default)]
+    pub column_sort: bool,
     /// Whether sort is case sensitive
     #[serde(default)]
     pub case_sensitive: bool,
+    /// CJK sort method.
+    #[serde(default)]
+    pub sort_method: SortMethod,
     /// Sort conditions
     pub conditions: Vec<TableSortCondition>,
+    /// Raw direct-child `<extLst>` owned by this sortState.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_lst_raw: Option<String>,
 }
 
 /// A single sort condition within a table sort state.
@@ -91,6 +124,21 @@ pub struct TableSortCondition {
     /// Whether this condition sorts descending
     #[serde(default)]
     pub descending: bool,
+    /// What to sort on: value, cell color, font color, or icon.
+    #[serde(default)]
+    pub sort_by: SortConditionBy,
+    /// Custom sort list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_list: Option<String>,
+    /// Differential format ID for color sorts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dxf_id: Option<u32>,
+    /// Conditional-formatting icon set for icon sorts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_set: Option<IconSetType>,
+    /// Zero-based icon ID for icon sorts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_id: Option<u32>,
 }
 
 impl Default for TableSpec {
@@ -109,6 +157,7 @@ impl Default for TableSpec {
             last_col_highlight: false,
             auto_filter_ref: None,
             auto_filter_xr_uid: None,
+            auto_filter_ext_lst_raw: None,
             columns: Vec::new(),
             header_row_dxf_id: None,
             data_dxf_id: None,
@@ -122,12 +171,17 @@ impl Default for TableSpec {
             table_type: None,
             totals_row_shown: None,
             connection_id: None,
+            comment: None,
             insert_row: false,
             insert_row_shift: false,
             published: false,
             xr_uid: None,
             sort_state: None,
             filter_columns: Vec::new(),
+            query_table: None,
+            worksheet_relationship_id_hint: None,
+            table_part_path_hint: None,
+            worksheet_relationship_target_hint: None,
         }
     }
 }
@@ -173,6 +227,9 @@ pub struct TableColumnSpec {
     /// Query table field ID (queryTableFieldId attribute).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_table_field_id: Option<u32>,
+    /// XML column properties for XML-mapped table columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xml_column_pr: Option<ooxml_types::tables::XmlColumnPr>,
     /// Extension UID for revision tracking (xr3:uid).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xr3_uid: Option<String>,
@@ -189,9 +246,12 @@ pub struct FilterColumnSpec {
     pub col_id: u32,
     #[serde(default)]
     pub hidden_button: bool,
-    #[serde(default, skip_serializing_if = "is_true_default")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true_default")]
     pub show_button: bool,
     pub filter: FilterSpec,
+    /// Raw direct-child `<extLst>` owned by this filterColumn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_lst_raw: Option<String>,
 }
 
 fn is_true_default(v: &bool) -> bool {
@@ -199,7 +259,7 @@ fn is_true_default(v: &bool) -> bool {
 }
 
 /// The filter type and settings for a single column.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FilterSpec {
     /// Discrete value filter (CT_Filters)
@@ -207,6 +267,10 @@ pub enum FilterSpec {
         #[serde(default)]
         blank: bool,
         values: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calendar_type: Option<super::filter::CalendarType>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        date_group_items: Vec<super::filter::DateGroupItem>,
     },
     /// Custom filter with 1-2 conditions (CT_CustomFilters)
     Custom {
@@ -249,6 +313,124 @@ pub enum FilterSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         icon_id: Option<u32>,
     },
+}
+
+impl<'de> Deserialize<'de> for FilterSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").is_none()
+            && let Some(object) = value.as_object()
+            && object.len() == 1
+            && let Some((legacy_kind, legacy_payload)) = object.iter().next()
+        {
+            let mut payload = legacy_payload.clone();
+            if let Some(payload_object) = payload.as_object_mut() {
+                payload_object.insert(
+                    "type".to_string(),
+                    serde_json::Value::String(legacy_kind.clone()),
+                );
+                value = payload;
+            }
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "camelCase")]
+        enum TaggedFilterSpec {
+            Values {
+                #[serde(default)]
+                blank: bool,
+                values: Vec<String>,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                calendar_type: Option<super::filter::CalendarType>,
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+                date_group_items: Vec<super::filter::DateGroupItem>,
+            },
+            Custom {
+                #[serde(default)]
+                and: bool,
+                filters: Vec<CustomFilterSpec>,
+            },
+            Top10 {
+                #[serde(default = "default_true")]
+                top: bool,
+                #[serde(default)]
+                percent: bool,
+                val: f64,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                filter_val: Option<f64>,
+            },
+            Dynamic {
+                kind: String,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                val: Option<f64>,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                max_val: Option<f64>,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                val_iso: Option<String>,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                max_val_iso: Option<String>,
+            },
+            Color {
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                dxf_id: Option<u32>,
+                #[serde(default = "default_true")]
+                cell_color: bool,
+            },
+            Icon {
+                icon_set: String,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                icon_id: Option<u32>,
+            },
+        }
+
+        Ok(
+            match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
+                TaggedFilterSpec::Values {
+                    blank,
+                    values,
+                    calendar_type,
+                    date_group_items,
+                } => Self::Values {
+                    blank,
+                    values,
+                    calendar_type,
+                    date_group_items,
+                },
+                TaggedFilterSpec::Custom { and, filters } => Self::Custom { and, filters },
+                TaggedFilterSpec::Top10 {
+                    top,
+                    percent,
+                    val,
+                    filter_val,
+                } => Self::Top10 {
+                    top,
+                    percent,
+                    val,
+                    filter_val,
+                },
+                TaggedFilterSpec::Dynamic {
+                    kind,
+                    val,
+                    max_val,
+                    val_iso,
+                    max_val_iso,
+                } => Self::Dynamic {
+                    kind,
+                    val,
+                    max_val,
+                    val_iso,
+                    max_val_iso,
+                },
+                TaggedFilterSpec::Color { dxf_id, cell_color } => {
+                    Self::Color { dxf_id, cell_color }
+                }
+                TaggedFilterSpec::Icon { icon_set, icon_id } => Self::Icon { icon_set, icon_id },
+            },
+        )
+    }
 }
 
 fn default_true() -> bool {
@@ -753,4 +935,60 @@ pub(crate) fn col_index_to_letter(col: u32) -> String {
         n /= 26;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_column_show_button_defaults_to_true_when_omitted() {
+        let spec: FilterColumnSpec = serde_json::from_value(serde_json::json!({
+            "colId": 0,
+            "filter": {
+                "type": "values",
+                "blank": false,
+                "values": ["A"]
+            }
+        }))
+        .unwrap();
+
+        assert!(spec.show_button);
+    }
+
+    #[test]
+    fn filter_column_show_button_explicit_true_uses_skip_true_policy() {
+        let spec: FilterColumnSpec = serde_json::from_value(serde_json::json!({
+            "colId": 0,
+            "showButton": true,
+            "filter": {
+                "type": "values",
+                "blank": false,
+                "values": ["A"]
+            }
+        }))
+        .unwrap();
+
+        assert!(spec.show_button);
+        let value = serde_json::to_value(&spec).unwrap();
+        assert!(value.get("showButton").is_none());
+    }
+
+    #[test]
+    fn filter_column_show_button_explicit_false_serializes_false() {
+        let spec: FilterColumnSpec = serde_json::from_value(serde_json::json!({
+            "colId": 0,
+            "showButton": false,
+            "filter": {
+                "type": "values",
+                "blank": false,
+                "values": ["A"]
+            }
+        }))
+        .unwrap();
+
+        assert!(!spec.show_button);
+        let value = serde_json::to_value(&spec).unwrap();
+        assert_eq!(value.get("showButton"), Some(&serde_json::json!(false)));
+    }
 }

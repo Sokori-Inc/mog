@@ -14,6 +14,7 @@ pub use ooxml_types::drawings::{
     SourceRect, StyleRef,
 };
 // Re-export geometry/anchor types from ooxml-types.
+pub use ooxml_types::drawings::ContentPartRef;
 pub use ooxml_types::drawings::{CellAnchor, Connection, Extent, Position, Transform2D};
 
 // Re-export shared text types from ooxml-types.
@@ -51,6 +52,11 @@ pub const NS_A14: &str = "http://schemas.microsoft.com/office/drawing/2010/main"
 pub const NS_SLE: &str = "http://schemas.microsoft.com/office/drawing/2010/slicer";
 /// URI for slicer graphicData
 pub const SLICER_GRAPHIC_DATA_URI: &str = "http://schemas.microsoft.com/office/drawing/2010/slicer";
+/// Namespace for timeline drawing extension (tsle)
+pub const NS_TSLE: &str = "http://schemas.microsoft.com/office/drawing/2012/timeslicer";
+/// URI for timeline graphicData
+pub const TIMELINE_GRAPHIC_DATA_URI: &str =
+    "http://schemas.microsoft.com/office/drawing/2012/timeslicer";
 /// Namespace for ChartEx (cx)
 pub const NS_CX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
 /// Namespace for ChartEx 2015 extension (cx1) — used in mc:Choice Requires
@@ -256,18 +262,30 @@ pub struct ChartExRef {
     pub name: String,
     /// Unique ID for the cNvPr
     pub id: u32,
-    /// xfrm offset x (for the mc:Fallback shape)
-    pub fallback_off_x: i64,
+    /// Graphic frame transform offset x.
+    pub xfrm_off_x: i64,
     /// xfrm offset y
-    pub fallback_off_y: i64,
-    /// xfrm extent cx (for the mc:Fallback shape)
-    pub fallback_ext_cx: i64,
+    pub xfrm_off_y: i64,
+    /// xfrm extent cx
+    pub xfrm_ext_cx: i64,
     /// xfrm extent cy
-    pub fallback_ext_cy: i64,
+    pub xfrm_ext_cy: i64,
     /// Macro name (@macro attribute on graphicFrame).
     /// `Some("")` preserves `macro=""` for round-trip fidelity.
     /// `None` means the attribute was absent and should not be emitted.
     pub macro_name: Option<String>,
+    /// Extension list on cNvPr — opaque XML passthrough (CT_NonVisualDrawingProps extLst).
+    pub nv_ext_lst: Option<String>,
+    /// Graphic frame locking properties (CT_GraphicalObjectFrameLocking).
+    pub graphic_frame_locks: DrawingLocking,
+    /// Whether `<a:graphicFrameLocks>` was present in the original XML.
+    pub has_graphic_frame_locks: bool,
+    /// Explicit `noChangeAspect` from original XML. `Some(false)` preserves `noChangeAspect="0"`.
+    pub no_change_aspect_explicit: Option<bool>,
+    /// Disallow drilldown — unique to CT_GraphicalObjectFrameLocking.
+    pub no_drilldown: bool,
+    /// Extension list from cNvGraphicFramePr.
+    pub c_nv_graphic_frame_pr_ext_lst: Option<String>,
 }
 
 /// Chart reference in drawing
@@ -503,6 +521,16 @@ pub struct OpaqueGraphicFrame {
     pub raw_xml: String,
 }
 
+/// Opaque unsupported spreadsheet drawing object.
+///
+/// Stores the complete direct object-choice XML. It is emitted only through the
+/// drawing relationship safety policy, so stale relationship attributes are
+/// suppressed unless their ids remain registered for the drawing part.
+#[derive(Debug, Clone, Default)]
+pub struct OpaqueDrawingObject {
+    pub raw_xml: String,
+}
+
 /// Group shape properties for writing `<xdr:grpSp>` elements (CT_GroupShape).
 #[derive(Debug, Clone)]
 pub struct GroupShapeProps {
@@ -611,6 +639,10 @@ pub enum DrawingObject {
     GroupShape(GroupShapeProps),
     /// Opaque graphic frame (roundtrip passthrough)
     GraphicFrame(OpaqueGraphicFrame),
+    /// Opaque unsupported direct drawing object (roundtrip passthrough).
+    OpaqueRaw(OpaqueDrawingObject),
+    /// Content part reference.
+    ContentPart(ContentPartRef),
     /// SmartArt diagram (opaque roundtrip with separate XML parts)
     SmartArt(SmartArtWriteData),
     /// Slicer (mc:AlternateContent with sle:slicer in graphicFrame)
@@ -621,6 +653,21 @@ pub enum DrawingObject {
         name: String,
         /// Relationship ID to slicer part (for the containing drawing's .rels)
         r_id: String,
+        /// Optional graphicFrame macro attribute.
+        macro_name: Option<String>,
+        /// Optional cNvPr extension list.
+        nv_ext_lst: Option<String>,
+    },
+    /// Timeline (mc:AlternateContent with tsle:timeslicer in graphicFrame).
+    Timeline {
+        /// Original cNvPr `id` from the parsed file (round-trip preservation).
+        original_id: Option<u32>,
+        /// Timeline name (matches TimelineDef.name).
+        name: String,
+        /// Optional graphicFrame macro attribute.
+        macro_name: Option<String>,
+        /// Optional cNvPr extension list.
+        nv_ext_lst: Option<String>,
     },
 }
 

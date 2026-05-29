@@ -13,7 +13,7 @@ use crate::write::XmlWriter;
 
 /// Write a `<color>` element for a `CFColorPoint`, using the most specific
 /// color attribute available (theme > indexed > rgb).
-fn write_cf_color_point_color(w: &mut XmlWriter, pt: &CFColorPoint) {
+pub(super) fn write_cf_color_point_color(w: &mut XmlWriter, pt: &CFColorPoint) {
     w.start_element("color");
     if let Some(theme) = pt.color_theme {
         w.attr_num("theme", theme);
@@ -30,19 +30,35 @@ fn write_cf_color_point_color(w: &mut XmlWriter, pt: &CFColorPoint) {
     w.self_close();
 }
 
-/// Write an extension color element for data bars, using the public CF color
-/// string shape accepted by `hex_to_argb`.
-fn write_data_bar_color_element(w: &mut XmlWriter, element: &str, color: &str) {
-    w.start_element(element)
-        .attr("rgb", &hex_to_argb(color))
-        .self_close();
-}
-
-fn cfvo_ooxml_value(point: &CFColorPoint) -> Option<String> {
+pub(super) fn cfvo_ooxml_value(point: &CFColorPoint) -> Option<String> {
     point
         .value
         .to_ooxml_val()
         .or_else(|| point.ooxml_value.clone())
+}
+
+fn write_cfvo_from_color_point(w: &mut XmlWriter, point: &CFColorPoint) {
+    w.start_element("cfvo")
+        .attr("type", point.value.cfvo_type().to_ooxml());
+    if let Some(val) = cfvo_ooxml_value(point) {
+        w.attr("val", &val);
+    }
+    w.self_close();
+}
+
+fn data_bar_has_x14_payload(data_bar: &domain_types::CFDataBar) -> bool {
+    data_bar.gradient.is_some()
+        || data_bar.show_border.is_some()
+        || data_bar.direction.is_some()
+        || data_bar.match_positive_fill_color.is_some()
+        || data_bar.match_positive_border_color.is_some()
+        || data_bar.axis_position.is_some()
+        || data_bar.negative_border_color.is_some()
+        || data_bar.negative_color.is_some()
+        || data_bar.border_color.is_some()
+        || data_bar.axis_color.is_some()
+        || data_bar.min_point.ext_lst_xml.is_some()
+        || data_bar.max_point.ext_lst_xml.is_some()
 }
 
 /// Build `<conditionalFormatting>` XML string from domain `ConditionalFormat` list.
@@ -81,7 +97,7 @@ pub fn cf_xml_from_domain(cfs: &[ConditionalFormat]) -> String {
 /// An empty `ranges` slice yields the empty string, matching the old
 /// `join(" ")` behaviour; the caller (`cf_xml_from_domain`) emits the
 /// `sqref=""` attribute verbatim in that case.
-fn ranges_to_sqref(ranges: &[CFCellRange]) -> String {
+pub(super) fn ranges_to_sqref(ranges: &[CFCellRange]) -> String {
     let sheet = cell_types::SheetId::from_raw(0);
     let ref_list: Vec<compute_parser::RangeRef> = ranges
         .iter()
@@ -262,21 +278,11 @@ fn write_cf_rule(w: &mut XmlWriter, rule: &CFRule, first_cell: &str) {
             w.end_attrs();
             w.start_element("colorScale").end_attrs();
 
-            // Collect points in order: min, [mid], max
-            let mut points = vec![&color_scale.min_point];
-            if let Some(ref mid) = color_scale.mid_point {
-                points.push(mid);
-            }
-            points.push(&color_scale.max_point);
+            let points = color_scale.ordered_points();
 
             // Write cfvo elements first, then color elements (OOXML order).
             for pt in &points {
-                w.start_element("cfvo")
-                    .attr("type", pt.value.cfvo_type().to_ooxml());
-                if let Some(val) = cfvo_ooxml_value(pt) {
-                    w.attr("val", &val);
-                }
-                w.self_close();
+                write_cfvo_from_color_point(w, pt);
             }
             for pt in &points {
                 write_cf_color_point_color(w, pt);
@@ -284,10 +290,10 @@ fn write_cf_rule(w: &mut XmlWriter, rule: &CFRule, first_cell: &str) {
             w.end_element("colorScale");
         }
         CFRule::DataBar {
+            id,
             data_bar,
             priority,
             stop_if_true,
-            ..
         } => {
             w.attr("type", "dataBar");
             w.attr_num("priority", *priority);
@@ -330,36 +336,36 @@ fn write_cf_rule(w: &mut XmlWriter, rule: &CFRule, first_cell: &str) {
                 w.attr("axisPosition", axis_position.to_ooxml());
             }
             w.end_attrs();
-            // min cfvo
-            w.start_element("cfvo")
-                .attr("type", data_bar.min_point.value.cfvo_type().to_ooxml());
-            if let Some(val) = cfvo_ooxml_value(&data_bar.min_point) {
-                w.attr("val", &val);
-            }
-            w.self_close();
-            // max cfvo
-            w.start_element("cfvo")
-                .attr("type", data_bar.max_point.value.cfvo_type().to_ooxml());
-            if let Some(val) = cfvo_ooxml_value(&data_bar.max_point) {
-                w.attr("val", &val);
-            }
-            w.self_close();
+            write_cfvo_from_color_point(w, &data_bar.min_point);
+            write_cfvo_from_color_point(w, &data_bar.max_point);
             // color
             w.start_element("color")
                 .attr("rgb", &hex_to_argb(&data_bar.positive_color))
                 .self_close();
-            if let Some(ref color) = data_bar.border_color {
-                write_data_bar_color_element(w, "borderColor", color);
+            if let Some(color) = &data_bar.border_color {
+                w.start_element("borderColor")
+                    .attr("rgb", &hex_to_argb(color))
+                    .self_close();
             }
-            if let Some(ref color) = data_bar.negative_color {
-                write_data_bar_color_element(w, "negativeFillColor", color);
+            if let Some(color) = &data_bar.negative_color {
+                w.start_element("negativeFillColor")
+                    .attr("rgb", &hex_to_argb(color))
+                    .self_close();
             }
-            if let Some(ref color) = data_bar.axis_color {
-                write_data_bar_color_element(w, "axisColor", color);
+            if let Some(color) = &data_bar.negative_border_color {
+                w.start_element("negativeBorderColor")
+                    .attr("rgb", &hex_to_argb(color))
+                    .self_close();
+            }
+            if let Some(color) = &data_bar.axis_color {
+                w.start_element("axisColor")
+                    .attr("rgb", &hex_to_argb(color))
+                    .self_close();
             }
             w.end_element("dataBar");
             // Write x14:id extension linking to extended databar properties
-            if let Some(ref ext_id) = data_bar.ext_id {
+            if data_bar_has_x14_payload(data_bar) {
+                let ext_id = data_bar.ext_id.as_deref().unwrap_or(id);
                 w.start_element("extLst").end_attrs();
                 w.start_element("ext")
                     .attr(
@@ -396,6 +402,9 @@ fn write_cf_rule(w: &mut XmlWriter, rule: &CFRule, first_cell: &str) {
             }
             if icon_set.show_icon_only == Some(true) {
                 w.attr("showValue", "0");
+            }
+            if let Some(percent) = icon_set.percent {
+                w.attr("percent", if percent { "1" } else { "0" });
             }
             w.end_attrs();
             for threshold in &icon_set.thresholds {
@@ -636,6 +645,7 @@ mod tests {
             color_tint: None,
             color_indexed: None,
             color_auto: None,
+            ext_lst_xml: None,
         }
     }
 
@@ -658,6 +668,7 @@ mod tests {
                     max_length: None,
                     positive_color: "#4472C4".to_string(),
                     negative_color: Some("#FF0000".to_string()),
+                    negative_border_color: None,
                     border_color: Some("#222222".to_string()),
                     show_border: Some(true),
                     gradient: Some(false),
@@ -689,6 +700,7 @@ mod tests {
         assert!(xml.contains("<borderColor rgb=\"FF222222\"/>"));
         assert!(xml.contains("<negativeFillColor rgb=\"FFFF0000\"/>"));
         assert!(xml.contains("<axisColor rgb=\"FF000000\"/>"));
+        assert!(xml.contains("<x14:id>rule-1</x14:id>"));
     }
 
     #[test]
@@ -710,6 +722,7 @@ mod tests {
                     max_length: None,
                     positive_color: "#4472C4".to_string(),
                     negative_color: None,
+                    negative_border_color: None,
                     border_color: None,
                     show_border: None,
                     gradient: None,
@@ -761,6 +774,7 @@ mod tests {
                     max_length: None,
                     positive_color: "#4472C4".to_string(),
                     negative_color: None,
+                    negative_border_color: None,
                     border_color: None,
                     show_border: None,
                     gradient: None,
@@ -800,6 +814,7 @@ mod tests {
                     max_length: Some(90),
                     positive_color: "#4472C4".to_string(),
                     negative_color: None,
+                    negative_border_color: None,
                     border_color: None,
                     show_border: Some(false),
                     gradient: Some(true),
