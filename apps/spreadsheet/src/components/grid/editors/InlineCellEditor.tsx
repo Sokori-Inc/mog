@@ -493,6 +493,29 @@ export function InlineCellEditor({ workbookSettings }: InlineCellEditorProps) {
       break;
   }
 
+  // Single source of truth for the editor's glyph typography. BOTH the
+  // caret-owning <textarea> and (for formulas) the FormulaHighlighter overlay
+  // read from this, so the visible text and the caret can never drift out of
+  // size/baseline alignment again.
+  //
+  // The size is the cell's *resolved* font scaled by zoom (textPosition.
+  // scaledFont) — never a hardcoded value — so large user fonts and any zoom
+  // level flow through to the editor automatically.
+  //
+  // IMPORTANT: never merge this with `undefined` font longhands in the same
+  // style object. React writes '' for undefined style values, and a trailing
+  // `fontFamily: undefined` after the `font` shorthand clears the shorthand,
+  // collapsing the layer back to the inherited 16px default (the regression
+  // that made formula text huge and misaligned).
+  const textTypography: React.CSSProperties = textPosition
+    ? { font: textPosition.scaledFont, lineHeight: `${scaledLineHeight}px` }
+    : {
+        fontFamily: cellStyles.fontFamily,
+        fontSize: cellStyles.fontSize,
+        fontWeight: cellStyles.fontWeight,
+        lineHeight: cellStyles.lineHeight,
+      };
+
   const baseEditorStyle = textPosition
     ? {
         // WYSIWYG: Use exact position from computeTextPosition()
@@ -505,8 +528,7 @@ export function InlineCellEditor({ workbookSettings }: InlineCellEditorProps) {
         height: effectiveCellRect.height,
         // Typography from resolved style - use scaledFont for zoom-correct rendering
         // Canvas uses ctx.scale(zoom) to scale text; DOM needs explicit font size scaling
-        font: textPosition.scaledFont,
-        lineHeight: `${scaledLineHeight}px`,
+        ...textTypography,
         color: style.color,
         backgroundColor: cellFormat?.backgroundColor || 'var(--color-ss-surface, #ffffff)',
         // Padding matching canvas
@@ -575,6 +597,18 @@ export function InlineCellEditor({ workbookSettings }: InlineCellEditorProps) {
     // by alt-mode "no-leak" scenarios that assert the keystream did not
     // bleed into the editor while a different mode owned the keys.
     'data-testid': 'inline-cell-editor',
+    // The textarea is a focusable overlay that owns its own pointer behavior:
+    // a click landing on it must position the text caret / drag a selection,
+    // NOT be reinterpreted by the grid's native pointerdown path. Without this
+    // opt-out, clicking inside the cell you are currently editing bubbles to
+    // the grid container listener (use-grid-mouse handlePointerDown), which —
+    // while editing — preventDefault()s the native caret placement and routes
+    // the click through interceptCellClick. In edit mode (e.g. after a
+    // double-click) that path sends COMMIT, so the click silently commits the
+    // formula and exits the editor instead of moving the caret. Clicks on OTHER
+    // cells land on the canvas (no data-no-grid-pointer) and still flow through
+    // the grid for commit-and-move / formula-reference insertion.
+    'data-no-grid-pointer': true,
     // Only auto-focus when not editing via formula bar
     // When formula bar has focus, show the editor but don't steal focus
     autoFocus: !isFormulaBarFocused,
@@ -656,9 +690,17 @@ export function InlineCellEditor({ workbookSettings }: InlineCellEditorProps) {
           width: '100%',
           height: '100%',
           color: 'transparent',
-          backgroundColor: cellFormat?.backgroundColor || '#ffffff',
+          // The parent formula-edit-overlay div paints the opaque cell fill, so
+          // the textarea itself MUST be transparent — otherwise its opaque
+          // background would cover the FormulaHighlighter glyphs beneath it.
+          backgroundColor: 'transparent',
           caretColor: style.color,
-          zIndex: 1,
+          // Sit ABOVE the highlighter overlay (zIndex:2). The native text caret
+          // is painted in this textarea's layer; any element stacked above it —
+          // even a transparent one — occludes the caret. Keeping the textarea
+          // on top makes the caret visible while the (transparent-text) value
+          // still lets the highlighter's colored glyphs show through.
+          zIndex: 3,
         }
       : baseEditorStyle,
   };
@@ -698,11 +740,10 @@ export function InlineCellEditor({ workbookSettings }: InlineCellEditorProps) {
           <div
             className="absolute inset-0 overflow-hidden"
             style={{
-              font: textPosition?.scaledFont,
-              fontFamily: textPosition ? undefined : cellStyles.fontFamily,
-              fontSize: textPosition ? undefined : cellStyles.fontSize,
-              fontWeight: textPosition ? undefined : cellStyles.fontWeight,
-              lineHeight: textPosition ? undefined : cellStyles.lineHeight,
+              // Same typography object the caret-owning textarea uses, so the
+              // highlighted formula text renders at the exact size/baseline as
+              // the caret (and as the canvas would draw it).
+              ...textTypography,
               paddingLeft: style.paddingX,
               paddingRight: style.paddingX,
               paddingTop: verticalPaddingTop,
