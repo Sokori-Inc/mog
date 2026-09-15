@@ -37,7 +37,6 @@ use compute_document::hex::hex_to_id;
 
 mod assembly;
 mod csv;
-mod deferred;
 mod indexes;
 mod named_ranges;
 mod range_styles;
@@ -50,17 +49,10 @@ mod types;
 mod xlsx;
 
 pub(super) use assembly::{
-    assemble_engine, from_snapshot, from_snapshot_with_layout_metrics,
-    rebuild_engine_from_snapshot, snapshot_id_high_water_mark,
+    assemble_engine, from_snapshot, from_snapshot_with_layout_metrics, rebuild_engine_from_snapshot,
 };
 pub(super) use csv::{from_csv_bytes, import_from_csv_bytes};
-pub(super) use deferred::{
-    commit_deferred_hydration, import_from_xlsx_bytes_deferred, stage_deferred_hydration,
-};
-pub(super) use indexes::{
-    build_grid_indexes, build_grid_indexes_from_allocations_range, build_merge_indexes,
-    build_merge_indexes_from_parse_output_range, build_pixel_layout_for_sheet,
-};
+pub(super) use indexes::{build_grid_indexes, build_merge_indexes, build_pixel_layout_for_sheet};
 pub(super) use named_ranges::{defined_names_to_named_range_defs, normalize_named_range_refs};
 pub(super) use range_styles::{build_imported_range_style_plan, range_style_formats_enabled};
 pub(in crate::storage::engine) use rebuild::build_finalized_store_from_snapshot;
@@ -75,8 +67,11 @@ pub(in crate::storage::engine) use table_auto_filter_projection::{
     materialize_table_auto_filters_for_sheets, materialize_table_auto_filters_from_preserved_specs,
     table_filter_spec_to_column_filter,
 };
-pub(super) use types::{DeferredHydrationCompletion, DeferredHydrationData, XlsxHydrateResult};
-pub(super) use xlsx::{from_xlsx_bytes, import_from_xlsx_bytes};
+pub(super) use types::{XlsxHydrateResult, XlsxRecalculation, XlsxStreamHydrateResult};
+pub(super) use xlsx::{from_xlsx_bytes, from_xlsx_bytes_with_progress, import_from_xlsx_bytes};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
+pub(super) use xlsx::from_xlsx_path;
 
 #[cfg(test)]
 mod tests {
@@ -196,8 +191,13 @@ mod tests {
             ],
         };
 
+        let cell_styles: Vec<(u32, u32, u32)> = sheet
+            .cells
+            .iter()
+            .filter_map(|cell| cell.style_id.map(|style| (cell.row, cell.col, style)))
+            .collect();
         let (_positions, styles) =
-            build_imported_range_style_plan(&sheet, &alloc, &[range], &mut allocator);
+            build_imported_range_style_plan(&cell_styles, &alloc, &[range], &mut allocator);
 
         let rects: Vec<_> = styles
             .iter()
@@ -319,8 +319,13 @@ mod tests {
             ],
         };
 
+        let cell_styles: Vec<(u32, u32, u32)> = sheet
+            .cells
+            .iter()
+            .filter_map(|cell| cell.style_id.map(|style| (cell.row, cell.col, style)))
+            .collect();
         let (positions, styles) =
-            build_imported_range_style_plan(&sheet, &alloc, &[range], &mut allocator);
+            build_imported_range_style_plan(&cell_styles, &alloc, &[range], &mut allocator);
 
         assert_eq!(positions.len(), 6);
         let rects: Vec<_> = styles

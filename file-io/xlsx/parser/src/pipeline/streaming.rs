@@ -1,23 +1,12 @@
-//! Streaming ZIP decompression module for XLSX parsing.
+//! Unified worksheet loading over incremental ZIP inflation.
 //!
-//! This module provides streaming decompression capabilities that allow
-//! emitting cells as chunks decompress, reducing memory usage and latency.
-//!
-//! # Architecture
-//!
-//! The streaming parser works in two stages:
-//! 1. `StreamingDeflate` - Incrementally decompresses DEFLATE data in chunks
-//! 2. `StreamingCellParser` - Parses XML cell data from decompressed chunks
-//!
-//! XML elements may span chunk boundaries, so the parser maintains pending
-//! data between chunks.
+//! `StreamingDeflate` validates and inflates bounded byte chunks; the worksheet
+//! parser resolves cells and forwards them to an optional native consumer.
 
-mod cell_parser;
-mod cell_xml;
 mod deflate;
-mod state;
 mod utf8;
+mod worksheet;
 
-pub use cell_parser::StreamingCellParser;
 pub use deflate::{DEFAULT_BUFFER_SIZE, StreamingDeflate};
-pub use state::ParseState;
+pub(crate) use worksheet::stream_parse_worksheet;
+pub use worksheet::{StreamLoadStats, XlsxCellSink};

@@ -167,12 +167,12 @@ fn assemble_engine_inner(
         history: Default::default(),
         viewport: ViewportService::new(),
         settings,
+        stream_load_stats: xlsx_parser::StreamLoadStats::default(),
         import_report: domain_types::ImportReport::default(),
         runtime_diagnostics: Default::default(),
         version_runtime_operation_context: Default::default(),
 
         scenario_session: crate::what_if::scenarios::ScenarioSessionState::default(),
-        deferred_hydration: None,
     };
 
     crate::storage::engine::services::imported_filters::normalize_imported_auto_filter_visibility(

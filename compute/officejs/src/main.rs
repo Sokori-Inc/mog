@@ -103,9 +103,8 @@ fn take_recalculate(args: Vec<String>) -> Result<(bool, Vec<String>), OfficeJsEr
 }
 
 fn load_workbook(path: &str) -> Result<Workbook, OfficeJsError> {
-    let bytes =
-        fs::read(path).map_err(|e| OfficeJsError::Script(format!("failed to read {path}: {e}")))?;
-    let (workbook, _) = Workbook::from_xlsx_bytes(&bytes)?;
+    let (workbook, _) = Workbook::from_xlsx_path(path)
+        .map_err(|e| OfficeJsError::Script(format!("failed to read {path}: {e}")))?;
     Ok(workbook)
 }
 
@@ -119,15 +118,8 @@ fn write_xlsx(workbook: &Workbook, out_path: &str) -> Result<(), OfficeJsError> 
             "output must be .xlsx, got {out_path}"
         )));
     }
-    let bytes = workbook.to_xlsx_bytes()?;
-    if let Some(parent) = Path::new(out_path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent).map_err(|e| {
-            OfficeJsError::Script(format!("failed to create {}: {e}", parent.display()))
-        })?;
-    }
-    fs::write(out_path, bytes)
+    workbook
+        .to_xlsx_path(out_path)
         .map_err(|e| OfficeJsError::Script(format!("failed to write {out_path}: {e}")))
 }
 

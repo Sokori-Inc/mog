@@ -23,9 +23,6 @@ pub use xlsx_parser::{
     CELL_TYPE_VAL_NUMBER, CELL_TYPE_VAL_STRING,
 };
 
-// --- Lazy loading types ---
-pub use xlsx_parser::{ParsedSheet, SheetMetadata};
-
 // --- Error handling types ---
 pub use xlsx_parser::{ErrorCode, ErrorCollector, ErrorLocation, ErrorSeverity};
 
@@ -58,9 +55,7 @@ pub use xlsx_parser::{XlsxArchive, ZipEntry, ZipError};
 
 // --- Bridge types ---
 pub use xlsx_parser::bridge::error::XlsxBridgeError;
-pub use xlsx_parser::bridge::types::{
-    BridgeLazyParseResult, BridgeLazyParseResultWithErrors, BridgeParseTimings,
-};
+pub use xlsx_parser::bridge::types::BridgeParseTimings;
 
 // --- Write types ---
 pub use xlsx_parser::ZipWriter as ParserZipWriter;

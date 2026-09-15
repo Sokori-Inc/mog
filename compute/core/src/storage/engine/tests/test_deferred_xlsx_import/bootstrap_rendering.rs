@@ -120,11 +120,11 @@ fn deferred_xlsx_import_materializes_active_visible_sheet_before_full_hydration(
     assert_eq!(
         engine.get_cell_value(&active_visible, 0, 0),
         CellValue::number(21.0),
-        "active visible sheet should be the first-paint materialized sheet"
+        "active visible sheet should be materialized"
     );
     assert!(
-        engine.get_cell_id_at(&hidden_first, 0, 0).is_none(),
-        "hidden first sheet sentinel should not be materialized before full hydration"
+        engine.get_cell_id_at(&hidden_first, 0, 0).is_some(),
+        "stream load materializes every sheet, including hidden tabs"
     );
 
     let filters = engine.get_filters_in_sheet(&active_visible);
@@ -175,7 +175,11 @@ fn deferred_xlsx_import_materializes_active_visible_sheet_before_full_hydration(
 
     let completion_result = engine
         .complete_deferred_hydration()
-        .expect("full deferred hydration should succeed");
+        .expect("stream load completion is a no-op");
+    assert!(
+        completion_result.filter_changes.is_empty(),
+        "completion must not repeat imported filter creation"
+    );
 
     assert_eq!(
         engine.get_cell_value(&hidden_first, 0, 0),
@@ -189,17 +193,9 @@ fn deferred_xlsx_import_materializes_active_visible_sheet_before_full_hydration(
     assert!(
         filters_after.iter().any(|filter| {
             filter.filter_kind == crate::storage::sheet::filters::FilterKind::AutoFilter
+                && filter.id == active_filter_id
         }),
-        "active visible sheet AutoFilter should remain after full hydration: {filters_after:?}"
-    );
-    assert!(
-        completion_result.filter_changes.iter().all(|change| {
-            !(change.sheet_id == active_visible.to_uuid_string()
-                && change.filter_id == active_filter_id.as_str()
-                && change.action.as_deref() == Some("created"))
-        }),
-        "full deferred hydration should not re-emit the first-paint AutoFilter creation: {:?}",
-        completion_result.filter_changes
+        "active visible sheet AutoFilter should remain after stream load: {filters_after:?}"
     );
 }
 
@@ -348,7 +344,7 @@ fn deferred_xlsx_import_emits_active_second_sheet_view_state_before_full_hydrati
 }
 
 #[test]
-fn deferred_xlsx_filter_clear_rejects_before_hydration_without_partial_mutation() {
+fn stream_xlsx_filter_clear_applies_immediately() {
     let bytes = active_visible_deferred_fixture_xlsx();
 
     let (mut engine, _) = ComputeEngine::from_snapshot(simple_snapshot()).unwrap();
@@ -367,36 +363,23 @@ fn deferred_xlsx_filter_clear_rejects_before_hydration_without_partial_mutation(
         "fixture AutoFilter should start with criteria: {active_filter:?}"
     );
     let active_filter_id = active_filter.id.clone();
-    let criteria_before = active_filter.column_filters.clone();
-    let hidden_before = engine.is_row_hidden_query(&active_visible, 2);
 
-    let err = match engine.clear_all_column_filters(&active_visible, &active_filter_id) {
-        Ok(_) => panic!("filter clear should reject before full deferred hydration"),
-        Err(err) => err,
-    };
-
-    assert!(
-        err.to_string().contains("deferred XLSX hydration"),
-        "clear should fail on the deferred hydration preflight, got {err:?}"
-    );
+    engine
+        .clear_all_column_filters(&active_visible, &active_filter_id)
+        .expect("stream load allows filter edits immediately");
     let filter_after = engine
         .get_filters_in_sheet(&active_visible)
         .into_iter()
         .find(|filter| filter.id == active_filter_id)
-        .expect("rejected clear must not remove the imported AutoFilter");
-    assert_eq!(
-        filter_after.column_filters, criteria_before,
-        "rejected clear must leave imported criteria unchanged"
-    );
-    assert_eq!(
-        engine.is_row_hidden_query(&active_visible, 2),
-        hidden_before,
-        "rejected clear must leave filtered row visibility unchanged"
+        .expect("cleared AutoFilter should still exist");
+    assert!(
+        filter_after.column_filters.is_empty(),
+        "filter clear should apply after stream load: {filter_after:?}"
     );
 }
 
 #[test]
-fn deferred_xlsx_cell_write_rejects_before_history_or_cell_metadata_mutates() {
+fn stream_xlsx_cell_write_preserves_identity_and_can_be_undone() {
     let bytes = active_visible_deferred_fixture_xlsx();
     let (mut engine, _) = ComputeEngine::from_snapshot(simple_snapshot()).unwrap();
     engine
@@ -410,28 +393,23 @@ fn deferred_xlsx_cell_write_rejects_before_history_or_cell_metadata_mutates() {
     let value_before = engine.get_cell_value(&active_visible, 0, 0);
     let undo_before = engine.get_undo_state();
 
-    let error = engine
+    engine
         .set_cell_value_parsed(&active_visible, 0, 0, "99")
-        .expect_err("cell write must wait for deferred XLSX hydration");
-    assert!(
-        error.to_string().contains("deferred XLSX hydration"),
-        "write should fail at the graph readiness preflight, got {error:?}"
+        .expect("stream load allows cell writes immediately");
+    assert_eq!(
+        engine.get_cell_value(&active_visible, 0, 0),
+        CellValue::number(99.0),
+        "cell write should apply after stream load"
     );
     assert_eq!(
         engine.get_cell_id_at(&active_visible, 0, 0),
-        Some(cell_id_before),
-        "rejected write must not replace the hydrated cell identity"
+        Some(cell_id_before)
     );
-    assert_eq!(
-        engine.get_cell_value(&active_visible, 0, 0),
-        value_before,
-        "rejected write must not change the hydrated cell value"
-    );
-    assert_eq!(
-        engine.get_undo_state(),
-        undo_before,
-        "rejected write must not leave a history entry"
-    );
+    assert_ne!(engine.get_undo_state(), undo_before);
+    engine
+        .undo()
+        .expect("imported cell write should be undoable");
+    assert_eq!(engine.get_cell_value(&active_visible, 0, 0), value_before);
 }
 
 #[test]

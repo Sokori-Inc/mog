@@ -2,7 +2,7 @@ use super::support::*;
 use super::*;
 
 #[test]
-fn deferred_xlsx_export_rejects_partial_workbook_until_full_hydration() {
+fn stream_xlsx_export_includes_every_sheet_immediately() {
     let bytes = deferred_calc_fixture_xlsx(DeferredCalcFixtureMode::Control);
 
     let (mut engine, _) = ComputeEngine::from_snapshot(simple_snapshot()).unwrap();
@@ -10,27 +10,18 @@ fn deferred_xlsx_export_rejects_partial_workbook_until_full_hydration() {
         .import_from_xlsx_bytes_deferred(&bytes)
         .expect("deferred XLSX import should succeed");
 
-    let parse_err = engine
-        .export_to_parse_output()
-        .expect_err("parse output export must not read a partial deferred workbook");
     assert!(
-        parse_err.to_string().contains("deferred XLSX hydration"),
-        "partial export should fail with a materialization error, got {parse_err}",
+        engine
+            .export_to_parse_output()
+            .unwrap()
+            .parse_output
+            .sheets
+            .len()
+            >= 2
     );
-    let bytes_err = engine
-        .export_to_xlsx_bytes()
-        .expect_err("XLSX export must not serialize a partial deferred workbook");
-    assert!(
-        bytes_err.to_string().contains("deferred XLSX hydration"),
-        "partial XLSX export should fail with a materialization error, got {bytes_err}",
-    );
-
-    engine
-        .complete_deferred_hydration()
-        .expect("full deferred hydration should succeed");
     let exported = engine
         .export_to_xlsx_bytes()
-        .expect("XLSX export should succeed after full hydration");
+        .expect("XLSX export should succeed after stream load");
     let parsed = xlsx_api::parse(&exported).expect("exported XLSX should parse");
     assert!(
         parsed.output.sheets.len() >= 2,

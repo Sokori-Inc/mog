@@ -1,7 +1,4 @@
-use crate::domain::cells::{
-    find_closing_tag_span, find_start_tag,
-    post_sheet_data_region as worksheet_post_sheet_data_region,
-};
+use crate::domain::cells::{find_closing_tag_span, find_start_tag};
 use crate::infra::xml::parse_string_attr;
 use crate::infra::xml_fragment::extract_element_bounds;
 use crate::infra::xml_namespaces::NamespaceMap;
@@ -185,6 +182,14 @@ pub(super) fn extract_worksheet_ext_lst_xml(post_sd: &[u8]) -> Option<String> {
     std::str::from_utf8(&post_sd[tag_pos..tag_pos + gt_pos + 1])
         .ok()
         .map(|s| s.to_string())
+}
+
+pub(super) fn worksheet_markup_without_sheet_data(pre: &[u8], post: &[u8]) -> Vec<u8> {
+    let mut xml = Vec::with_capacity(pre.len() + post.len() + b"<sheetData/>".len());
+    xml.extend_from_slice(pre);
+    xml.extend_from_slice(b"<sheetData/>");
+    xml.extend_from_slice(post);
+    xml
 }
 
 pub(super) fn extract_raw_element_xml(xml: &[u8], tag: &[u8]) -> Option<String> {
@@ -408,8 +413,9 @@ pub(super) fn find_matching_alternate_content_end(xml: &[u8], start: usize) -> O
 /// Falls back to an empty slice at end-of-file so that callers never receive
 /// the full document as the "post" region, which would cause the root
 /// `<worksheet>` opening tag to be mistakenly captured as a preserved child.
+#[cfg(test)]
 pub(super) fn find_post_sheet_data_region(xml: &[u8]) -> &[u8] {
-    worksheet_post_sheet_data_region(xml)
+    crate::domain::cells::post_sheet_data_region(xml)
 }
 
 pub(super) fn parse_external_reference_rids(workbook_xml: &[u8]) -> Vec<String> {

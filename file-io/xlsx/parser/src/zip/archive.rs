@@ -18,6 +18,7 @@ mod read;
 mod recovery;
 mod streaming;
 mod validation;
+mod xml_reader;
 
 #[cfg(test)]
 mod deflate_tests;
@@ -129,5 +130,11 @@ impl<'a> XlsxArchive<'a> {
     /// Check if a file exists in the archive
     pub fn contains(&self, name: &str) -> bool {
         self.entries.iter().any(|e| e.name == name)
+    }
+
+    /// Charge streamed uncompressed output against the archive safety budget.
+    pub(crate) fn charge_uncompressed(&self, bytes: usize) -> Result<(), ZipError> {
+        let dummy = ZipEntry::new(String::new(), 0, 0, bytes, 0, 0);
+        self.charge_materialized(&dummy, bytes)
     }
 }

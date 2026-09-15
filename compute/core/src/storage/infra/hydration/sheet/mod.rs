@@ -9,7 +9,7 @@ mod allocation;
 mod grid_index;
 mod identity;
 
-pub(crate) use allocation::{allocate_sheet_ids, allocate_sheet_ids_with_previous_allocation};
+pub(crate) use allocation::{allocate_sheet_ids, allocate_sheet_ids_after_sheet_id};
 pub(crate) use identity::SheetIdAllocation;
 
 use super::IdAllocator;
@@ -132,6 +132,7 @@ pub(crate) fn hydrate_sheet_with_allocation(
         ranged_positions,
         range_style_positions,
         &required_identity_positions,
+        &alloc.existing_identities,
     );
 
     insert_missing_anchored_identities(&mut pos_map, &alloc.identity_only_cells);

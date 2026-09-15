@@ -84,6 +84,87 @@ impl CellStore {
         self.insert_cell_with_formula(sheet, cell_id, pos, entry, None);
     }
 
+    /// Create an empty sheet used while XLSX cells stream in during inflate.
+    pub(crate) fn open_stream_sheet(&mut self, name: &str) -> SheetId {
+        let sheet_id = self.id_alloc.next_sheet_id();
+        let snap = snapshot_types::SheetSnapshot {
+            id: format!("{:032x}", sheet_id.as_u128()),
+            name: name.to_string(),
+            rows: 1,
+            cols: 1,
+            cells: Vec::new(),
+            ranges: Vec::new(),
+            identities: Vec::new(),
+            row_axis: Some(cell_types::AxisIdentityStore::from_runs([self
+                .id_alloc
+                .next_axis_run(1)])),
+            col_axis: Some(cell_types::AxisIdentityStore::from_runs([self
+                .id_alloc
+                .next_axis_run(1)])),
+        };
+        let _ = self.add_sheet(snap);
+        sheet_id
+    }
+
+    /// Insert one decoded imported value using its stable authored identity.
+    pub(crate) fn ingest_streamed_xlsx_cell(
+        &mut self,
+        sheet: &SheetId,
+        row: u32,
+        col: u32,
+        value: CellValue,
+    ) -> CellId {
+        let pos = SheetPos::new(row, col);
+        // Reserve compact identity runs geometrically. Growing and rebuilding
+        // the axis indexes for every new row makes sequential imports quadratic.
+        if let Some(s) = self.sheets.get(sheet) {
+            if s.row_id_at(row).is_none() || s.col_id_at(col).is_none() {
+                let mut grid = compute_document::identity::GridIndex::from_shared_axes(
+                    *sheet,
+                    s.row_axis.clone(),
+                    s.col_axis.clone(),
+                    self.id_alloc.clone(),
+                );
+                let reserve = |position: u32| {
+                    position
+                        .saturating_add(1)
+                        .checked_next_power_of_two()
+                        .unwrap_or(u32::MAX)
+                        .saturating_sub(1)
+                };
+                grid.ensure_capacity(reserve(row), reserve(col));
+                self.install_sheet_axes(*sheet, grid.row_axis(), grid.col_axis());
+            }
+        }
+        let cell_id = self
+            .get_sheet(sheet)
+            .and_then(|sheet| sheet.authored_cell_id_at(pos))
+            .unwrap_or_else(|| self.id_alloc.next_cell_id());
+        self.insert_cell(sheet, cell_id, pos, CellEntry { value });
+        cell_id
+    }
+
+    /// Discard unused import capacity while preserving authored identities and
+    /// the actual worksheet extent before metadata hydration allocates axes.
+    pub(crate) fn finish_stream_sheet(&mut self, sheet: SheetId) {
+        let Some(s) = self.sheets.get(&sheet) else {
+            return;
+        };
+        let (rows, cols) = (s.rows.max(1), s.cols.max(1));
+        let mut grid = compute_document::identity::GridIndex::from_shared_axes(
+            sheet,
+            s.row_axis.clone(),
+            s.col_axis.clone(),
+            self.id_alloc.clone(),
+        );
+        grid.truncate_rows(rows);
+        grid.truncate_cols(cols);
+        self.install_sheet_axes(sheet, grid.row_axis(), grid.col_axis());
+        let s = self.sheets.get_mut(&sheet).expect("streamed sheet");
+        s.identity_rows = rows;
+        s.identity_cols = cols;
+    }
+
     fn insert_cell_with_formula(
         &mut self,
         sheet: &SheetId,

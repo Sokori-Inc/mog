@@ -101,6 +101,9 @@ pub struct ComputeEngine {
     history: history::HistoryStack,
     pub(crate) viewport: ViewportService,
     pub(crate) settings: EngineSettings,
+    /// Stream-inflate counters from the most recent XLSX load on this engine.
+    pub(crate) stream_load_stats: xlsx_parser::StreamLoadStats,
+
     /// Last canonical import report for this engine instance.
     ///
     /// This is runtime-only diagnostic state: it is replaced on workbook import,
@@ -125,10 +128,6 @@ pub struct ComputeEngine {
     /// baseline, writes scenario values through `apply_mutation`, and restore
     /// consumes that baseline through `apply_mutation`.
     pub(crate) scenario_session: crate::what_if::scenarios::ScenarioSessionState,
-
-    /// Remaining import state when only the critical sheet has been hydrated.
-    /// `complete_deferred_hydration` installs the remaining metadata and indexes.
-    deferred_hydration: Option<construction::DeferredHydrationData>,
 }
 
 impl ComputeEngine {

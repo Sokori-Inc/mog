@@ -18,7 +18,7 @@ use domain_types::{
     RichTextRun, Sparkline as DtSparkline, SparklineAxisSettings, SparklineCellAddress,
     SparklineDataRange, SparklineGroup as DtSparklineGroup, SparklineType as DtSparklineType,
     SparklineVisualSettings, TableColumnSpec, TableSpec, TotalsFunction, ValidationOperator,
-    ValidationRule, ValidationSpec, chart::ObjectSize,
+    ValidationRule, ValidationSpec,
 };
 
 use crate::domain::drawings::{Anchor as DrawingAnchor, Drawing, DrawingContent};
@@ -74,3 +74,5 @@ pub(crate) use print::{convert_hf_images, convert_page_breaks, convert_print_set
 pub(crate) use sparklines::convert_sparkline_groups;
 pub(crate) use tables::convert_tables;
 pub(crate) use validations::convert_data_validations;
+
+pub use charts::{ChartSourceRange, refresh_chart_source_fingerprints};
