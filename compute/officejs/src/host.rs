@@ -476,6 +476,10 @@ impl RangeRef {
 
     /// Return the optional unqualified A1 address.  `None` represents the
     /// whole worksheet or another unbounded range.
+    pub(crate) fn ensure_present(&self) -> Result<(), BatchError> {
+        parsed_range(self).map(|_| ())
+    }
+
     pub(crate) fn address(&self) -> Option<&str> {
         self.address.as_deref()
     }
@@ -501,6 +505,7 @@ pub(crate) struct Host {
     worksheet_collections: Mutex<HashSet<String>>,
     null_worksheets: Mutex<HashSet<String>>,
     ranges: Mutex<HashMap<String, RangeRef>>,
+    range_areas: Mutex<HashMap<String, HashMap<String, Value>>>,
     formats: Mutex<HashMap<String, FormatRef>>,
     tables: Mutex<HashMap<String, TableRef>>,
     null_tables: Mutex<HashSet<String>>,
@@ -535,7 +540,9 @@ impl Host {
     fn default_extensions() -> ExtensionRegistry {
         let registry = ExtensionRegistry::default();
         registry.register(crate::range_ops::RangeOpsHandler);
+        registry.register(crate::range_queries::RangeQueriesHandler);
         registry.register(crate::freeze::FreezeHandler);
+        registry.register(crate::table_filters::TableFiltersHandler);
         registry.register(crate::worksheets::WorksheetOpsHandler);
         registry.register(crate::comments::CommentsHandler);
         registry.register(crate::conditional::ConditionalHandler);
@@ -554,6 +561,7 @@ impl Host {
             worksheet_collections: Mutex::new(HashSet::new()),
             null_worksheets: Mutex::new(HashSet::new()),
             ranges: Mutex::new(HashMap::new()),
+            range_areas: Mutex::new(HashMap::new()),
             formats: Mutex::new(HashMap::new()),
             tables: Mutex::new(HashMap::new()),
             null_tables: Mutex::new(HashSet::new()),
@@ -615,6 +623,37 @@ impl Host {
             })
     }
 
+    pub(crate) fn bind_range(&self, id: &str, range: RangeRef) {
+        self.ranges
+            .lock()
+            .expect("ranges lock")
+            .insert(id.to_string(), range);
+    }
+
+    pub(crate) fn lookup_table(&self, id: &str) -> Result<TableRef, BatchError> {
+        self.tables
+            .lock()
+            .expect("tables lock")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| BatchError {
+                code: "InvalidObjectPath",
+                message: "The table is not available.".into(),
+            })
+    }
+
+    pub(crate) fn lookup_table_column(&self, id: &str) -> Result<TableColumnRef, BatchError> {
+        self.table_columns
+            .lock()
+            .expect("columns lock")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| BatchError {
+                code: "InvalidObjectPath",
+                message: "The table column is not available.".into(),
+            })
+    }
+
     pub(crate) fn bind_worksheet(&self, id: &str, worksheet: WorksheetRef) {
         self.sheets
             .lock()
@@ -641,8 +680,9 @@ impl Host {
         &self,
         operation: &Value,
         loaded: &mut HashMap<String, HashMap<String, Value>>,
+        results: &mut HashMap<String, Value>,
     ) -> Result<ExtensionDispatch, BatchError> {
-        let mut context = HostDispatchContext::new(self, loaded);
+        let mut context = HostDispatchContext::new(self, loaded, results);
         let handled = self.extensions.dispatch(operation, &mut context)?;
         Ok(ExtensionDispatch {
             handled,
@@ -728,7 +768,7 @@ impl Host {
             // Give extension handlers first refusal for both new operation
             // names and property additions to existing core objects.  A
             // handler can return `false` to preserve the core path below.
-            let dispatch = self.dispatch_extension(&raw_op, &mut loaded)?;
+            let dispatch = self.dispatch_extension(&raw_op, &mut loaded, &mut results)?;
             let has_delegated_load = dispatch.delegated_load.is_some();
             let raw_op = if let Some((target_id, properties)) = dispatch.delegated_load {
                 let operation_id =
@@ -1316,44 +1356,32 @@ impl Host {
                             message: "The range object is not available.".to_string(),
                         })?;
                     let cells = validation.invalid_cells().map_err(validation_error)?;
-                    if cells.is_empty() {
-                        if !or_null_object {
-                            return Err(BatchError {
-                                code: "ItemNotFound",
-                                message: "No cells fail data validation.".to_string(),
-                            });
-                        }
-                        mark_object(&mut loaded, &id, true);
-                        self.ranges.lock().expect("ranges lock").insert(
-                            id,
-                            RangeRef {
-                                sheet: range.sheet,
-                                is_null_object: true,
-                                address: None,
-                            },
-                        );
-                    } else {
-                        let min_row = cells.iter().map(|(row, _)| *row).min().unwrap();
-                        let max_row = cells.iter().map(|(row, _)| *row).max().unwrap();
-                        let min_col = cells.iter().map(|(_, col)| *col).min().unwrap();
-                        let max_col = cells.iter().map(|(_, col)| *col).max().unwrap();
-                        let address = RangeAddress::Cells {
-                            start_row: min_row,
-                            start_column: min_col,
-                            end_row: max_row,
-                            end_column: max_col,
-                        }
-                        .to_a1();
-                        mark_object(&mut loaded, &id, false);
-                        self.ranges.lock().expect("ranges lock").insert(
-                            id,
-                            RangeRef {
-                                sheet: range.sheet,
-                                is_null_object: false,
-                                address: Some(address),
-                            },
-                        );
+                    if cells.is_empty() && !or_null_object {
+                        return Err(BatchError {
+                            code: "ItemNotFound",
+                            message: "No cells fail data validation.".into(),
+                        });
                     }
+                    let sheet_name =
+                        qualified_sheet_name(&range.sheet.name().map_err(engine_error)?);
+                    let addresses = crate::validation::invalid_cell_areas(&cells);
+                    let address = addresses
+                        .iter()
+                        .map(|a| format!("{sheet_name}!{a}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let is_null = cells.is_empty();
+                    mark_object(&mut loaded, &id, is_null);
+                    self.range_areas.lock().expect("range areas lock").insert(
+                        id,
+                        HashMap::from([
+                            ("isNullObject".into(), json!(is_null)),
+                            ("address".into(), json!(address)),
+                            ("addressLocal".into(), json!(address)),
+                            ("areaCount".into(), json!(addresses.len())),
+                            ("cellCount".into(), json!(cells.len())),
+                        ]),
+                    );
                 }
                 Op::RangeClear { id, apply_to } => {
                     let range = self
@@ -2268,13 +2296,69 @@ impl Host {
                         continue;
                     }
                     let write_property = WriteProperty::from_name(&property)?;
-                    let grid = json_to_write_grid(&value, write_property)?;
+                    let mut grid = json_to_write_grid(&value, write_property)?;
+                    let bounds =
+                        crate::range_navigation::parse_range_address(&range.sheet, address)
+                            .map_err(|error| BatchError {
+                                code: error.code,
+                                message: error.message,
+                            })?
+                            .bounds();
+                    // Constants in table totals rows are labels, including
+                    // numeric JS values. Formulas retain their formula intent.
+                    for table in range.sheet.tables().get_all().map_err(engine_error)? {
+                        let row = table.range.end_row();
+                        if !table.has_totals_row || row < bounds.0 || row > bounds.2 {
+                            continue;
+                        }
+                        if let Some(values) = grid.get_mut((row - bounds.0) as usize) {
+                            for (offset, input) in values.iter_mut().enumerate() {
+                                let col = bounds.1 + offset as u32;
+                                if col < table.range.start_col() || col > table.range.end_col() {
+                                    continue;
+                                }
+                                let text = match input.as_ref() {
+                                    Some(CellInput::Value { value }) => Some(value.to_string()),
+                                    Some(CellInput::Parse { text })
+                                        if !has_formula_intent(text, write_property) =>
+                                    {
+                                        Some(text.clone())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(text) = text {
+                                    *input = Some(CellInput::Literal { text });
+                                }
+                            }
+                        }
+                    }
                     range
                         .sheet
                         .set_range_typed(address, &grid)
                         .map_err(write_error)?;
                 }
                 Op::Load { id, properties } => {
+                    if let Some(areas) = self.range_areas.lock().expect("range areas lock").get(&id)
+                    {
+                        let props = loaded.entry(id).or_default();
+                        let properties = if properties.is_empty() {
+                            vec![
+                                "address".into(),
+                                "addressLocal".into(),
+                                "areaCount".into(),
+                                "cellCount".into(),
+                            ]
+                        } else {
+                            properties
+                        };
+                        for property in properties {
+                            let value = areas.get(&property).ok_or_else(|| {
+                                unsupported_load_property("RangeAreas", &property)
+                            })?;
+                            props.insert(property, value.clone());
+                        }
+                        continue;
+                    }
                     let sheet = self.sheets.lock().expect("sheets lock").get(&id).cloned();
                     let null_worksheet = self
                         .null_worksheets
@@ -2490,6 +2574,32 @@ impl Host {
                                             Value::Null
                                         } else {
                                             range_formulas_json(&range.sheet, metadata.bounds)?
+                                        },
+                                    );
+                                }
+                                "rowHidden" | "columnHidden" => {
+                                    let (sr, sc, er, ec) = metadata.bounds;
+                                    let rows = property == "rowHidden";
+                                    let hidden = if rows {
+                                        range.sheet.layout().get_hidden_rows()
+                                    } else {
+                                        range.sheet.layout().get_hidden_columns()
+                                    }
+                                    .map_err(engine_error)?;
+                                    let (start, end) = if rows { (sr, er) } else { (sc, ec) };
+                                    let count = hidden
+                                        .iter()
+                                        .filter(|index| **index >= start && **index <= end)
+                                        .count()
+                                        as u32;
+                                    props.insert(
+                                        property.clone(),
+                                        if count == 0 {
+                                            json!(false)
+                                        } else if count == end - start + 1 {
+                                            json!(true)
+                                        } else {
+                                            Value::Null
                                         },
                                     );
                                 }
@@ -3230,7 +3340,7 @@ fn js_cell_to_write(
         Value::String(value) if has_formula_intent(value, property) => {
             Ok(Some(CellInput::formula(value)))
         }
-        Value::String(value) => Ok(Some(CellInput::Literal {
+        Value::String(value) => Ok(Some(CellInput::Parse {
             text: value.clone(),
         })),
         _ => Err(BatchError {
